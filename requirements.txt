@@ -1,4 +1,5 @@
-umaxbot
-python-dotenv>=1.0.0
-aiohttp>=3.9.0
-flask>=2.0.0
+umaxbot==0.1.8
+maxbot-chatbot-python==0.1.0
+python-dotenv==1.0.0
+flask==2.3.3
+aiohttp==3.9.0
