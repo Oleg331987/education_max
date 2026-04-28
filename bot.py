@@ -555,10 +555,8 @@ logger.info(f"Health check server started on port {os.environ.get('PORT', 8080)}
 
 # ========== ЗАПУСК БОТА ==========
 async def main():
-    # В umaxbot нет метода delete_webhook, пропускаем
     logger.info("Запуск polling...")
-    # Правильный способ запуска: bot.run_polling(dispatcher)
-    await bot.run_polling(dp)
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     try:
