@@ -1,5 +1,4 @@
-maxapi>=0.9.13
+maxbot>=0.0.1
 python-dotenv>=1.0.0
 aiohttp>=3.9.0
-requests>=2.32.3
-Flask>=2.3.0
+flask>=2.0.0
