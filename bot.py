@@ -568,6 +568,13 @@ flask_thread.start()
 logger.info(f"Health check server started on port {os.environ.get('PORT', 8080)}")
 
 # ========== ЗАПУСК БОТА ==========
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 async def main():
     try:
         await bot.delete_webhook()
