@@ -6,10 +6,10 @@ import sys
 from datetime import datetime
 from dotenv import load_dotenv
 
-# Импорты из библиотеки maxapi
+# Импорты из библиотеки maxapi (исправленные)
 from maxapi import Bot, Dispatcher, F
 from maxapi.types import (
-    BotStarted, Command, MessageCreated, CallbackQuery,
+    BotStarted, Command, MessageCreated, CallbackButton,
     InlineKeyboardMarkup, InlineKeyboardButton
 )
 
@@ -64,7 +64,7 @@ def save_user_progress(progress):
 
 
 user_progress = load_user_progress()
-user_states = {}  # {user_id: "state_name"}
+user_states = {}  # {user_id: state_name}
 user_temp_data = {}  # {user_id: {"current_module": int, "answers": {}, "current_question": int}}
 
 
@@ -180,7 +180,9 @@ async def send_audio_module(chat_id: int, module_index: int):
     with open(audio_path, "rb") as f:
         audio_bytes = f.read()
     caption = f"🎧 {module['emoji']} Аудио к уроку {module_index + 1}: {module['title']}"
-    await bot.send_file(chat_id=chat_id, file=audio_bytes, filename=module["audio_file"], caption=caption)
+    # В maxapi нет send_file, используем send_document
+    from maxapi import InputFile
+    await bot.send_document(chat_id=chat_id, document=InputFile(audio_bytes, filename=module["audio_file"]), caption=caption)
 
 
 async def show_module(chat_id: int, module_index: int):
@@ -314,8 +316,9 @@ async def handle_text_messages(event: MessageCreated):
         await show_main_menu(user_id)
 
 
+# Обработчик callback-запросов – используем CallbackButton
 @dp.callback_query()
-async def handle_callback(cb: CallbackQuery):
+async def handle_callback(cb: CallbackButton):
     user_id = cb.user.id
     data = cb.data
     state = user_states.get(user_id)
@@ -423,8 +426,9 @@ async def handle_callback(cb: CallbackQuery):
         checklist_path = "Чек-лист -Первые 10 шагов в тендерах-.docx"
         if os.path.exists(checklist_path):
             with open(checklist_path, "rb") as f:
-                await bot.send_file(chat_id=user_id, file=f.read(), filename="checklist.docx",
-                                    caption="📥 Чек-лист первых 10 шагов")
+                from maxapi import InputFile
+                await bot.send_document(chat_id=user_id, document=InputFile(f.read(), filename="checklist.docx"),
+                                        caption="📥 Чек-лист первых 10 шагов")
         else:
             await bot.send_message(chat_id=user_id, text="Файл чек-листа временно недоступен.")
         await cb.answer()
@@ -434,7 +438,8 @@ async def handle_callback(cb: CallbackQuery):
         await bot.send_message(chat_id=user_id, text="💳 Стоимость доступа: 3 999 руб.\nОплата по QR-коду:\n(отправьте фото QR или реквизиты)")
         if os.path.exists("qr_code.png"):
             with open("qr_code.png", "rb") as f:
-                await bot.send_file(chat_id=user_id, file=f.read(), filename="qr_code.png", caption="QR-код для оплаты")
+                from maxapi import InputFile
+                await bot.send_photo(chat_id=user_id, photo=InputFile(f.read(), filename="qr_code.png"), caption="QR-код для оплаты")
         if MANAGER_CHAT_ID:
             await bot.send_message(chat_id=MANAGER_CHAT_ID, text=f"🔔 Запрос доступа от {user_id}")
         await cb.answer()
