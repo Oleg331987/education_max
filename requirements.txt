@@ -1,5 +1,4 @@
---no-cache-dir
-umaxbot>=0.1.7
+maxapi>=0.9.13
 python-dotenv>=1.0.0
-flask>=3.0.0
+flask>=2.3.3
 aiohttp>=3.9.0
