@@ -6,18 +6,18 @@ import sys
 from datetime import datetime
 from dotenv import load_dotenv
 
-# Импорты из библиотеки maxbot
+# Импорты из библиотеки umaxbot
 from maxbot.bot import Bot
 from maxbot.dispatcher import Dispatcher
-from maxbot.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
+from maxbot.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
+from maxbot.callback_query import CallbackQuery
+from maxbot.fsm import MemoryStorage, State, StatesGroup
 from maxbot.filters import Command, CallbackData
-from maxbot.utils import F
-from maxbot.fsm import State, StatesGroup, MemoryStorage
 
 from access_control import AccessControl
 from modules_data import MODULES, TEST_QUESTIONS, ADDITIONAL_MATERIALS
 
-# Flask для health check (чтобы Render не отключал бота)
+# Flask для health check на Render
 from flask import Flask
 import threading
 
@@ -33,10 +33,10 @@ if not BOT_TOKEN:
 
 MANAGER_CHAT_ID = int(os.getenv('MANAGER_CHAT_ID', 0))
 if not MANAGER_CHAT_ID:
-    logger.warning("MANAGER_CHAT_ID не задан, уведомления о платежах не будут отправляться")
+    logger.warning("MANAGER_CHAT_ID не задан")
 
 # === Инициализация FSM и других систем ===
-storage = MemoryStorage()  # Хранилище для состояний
+storage = MemoryStorage()
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot, storage=storage)
 access_control = AccessControl()
@@ -62,6 +62,7 @@ def save_user_progress(progress):
         logger.error(f"Ошибка сохранения прогресса: {e}")
 
 user_progress = load_user_progress()
+test_data = {}
 
 # Определение состояний для FSM
 class UserState(StatesGroup):
@@ -70,10 +71,6 @@ class UserState(StatesGroup):
     taking_test = State()
     admin_add_user = State()
     admin_remove_user = State()
-
-# Глобальный словарь для хранения временных данных (answers, skipped)
-# В production лучше использовать FSM data, но для простоты оставим так
-test_data = {}
 
 # ========== КЛАВИАТУРЫ ==========
 def get_main_keyboard(user_id: int):
@@ -181,12 +178,11 @@ async def send_audio_module(chat_id: int, module_index: int):
         return
     with open(audio_path, "rb") as f:
         audio_bytes = f.read()
-    caption = f"🎧 {module['emoji']} Аудио к уроку {module_index+1}: {module['title']}\nПосле прослушивания нажмите «✅ Отметить текущий модуль»."
+    caption = f"🎧 {module['emoji']} Аудио к уроку {module_index+1}: {module['title']}"
     await bot.send_file(chat_id=chat_id, file=audio_bytes, filename=module["audio_file"], caption=caption)
 
 async def show_module(chat_id: int, module_index: int):
     module = MODULES[module_index]
-    # Сохраняем состояние
     await dp.storage.set_state(chat_id, UserState.viewing_module)
     await dp.storage.set_data(chat_id, {"current_module": module_index})
     text = module["content"].replace("<b>", "*").replace("</b>", "*") + "\n\n"
@@ -197,7 +193,7 @@ async def show_module(chat_id: int, module_index: int):
     await bot.send_message(chat_id=chat_id, text="Навигация:", reply_markup=get_lesson_navigation_keyboard(module_index, len(MODULES)))
 
 async def send_test_question(chat_id: int, q_index: int):
-    state = await dp.storage.get_state(chat_id)
+    await dp.storage.set_state(chat_id, UserState.taking_test)
     if q_index >= len(TEST_QUESTIONS):
         await finish_test(chat_id)
         return
@@ -240,22 +236,18 @@ async def finish_test(chat_id: int):
     })
     save_user_progress(user_progress)
     await bot.send_message(chat_id=chat_id, text=result_text)
+    test_data.pop(chat_id, None)
     await show_main_menu(chat_id)
-    test_data.pop(chat_id, None)  # Очищаем временные данные теста
-    await dp.storage.set_state(chat_id, None)
 
 async def show_main_menu(chat_id: int):
     await dp.storage.set_state(chat_id, None)
     await bot.send_message(chat_id=chat_id, text="Главное меню:", reply_markup=get_main_keyboard(chat_id))
 
-# ========== ОБРАБОТЧИКИ СОБЫТИЙ maxbot ==========
-
-# Команда /start
+# ========== ОБРАБОТЧИКИ ==========
 @dp.message(Command('start'))
 async def cmd_start(message: Message):
-    user_id = message.sender.id
-    if user_id not in user_progress:
-        user_progress[user_id] = {
+    if message.sender.id not in user_progress:
+        user_progress[message.sender.id] = {
             'start_date': datetime.now().isoformat(),
             'completed_modules': [],
             'last_module': 0,
@@ -264,29 +256,58 @@ async def cmd_start(message: Message):
             'test_results': []
         }
         save_user_progress(user_progress)
-    await show_main_menu(user_id)
+    await show_main_menu(message.sender.id)
 
-@dp.message(F.text == "bot_started")
-async def on_bot_started(message: Message):
-    await cmd_start(message)
+@dp.message()
+async def handle_text_messages(message: Message):
+    user_id = message.sender.id
+    text = message.body.text
+    current_state = await dp.storage.get_state(user_id)
 
-# Обработка Callback-запросов (нажатий на кнопки)
-@dp.callback_query()
+    if current_state == UserState.admin_add_user:
+        if text.isdigit():
+            uid = int(text)
+            if access_control.add_paid_user(uid):
+                await bot.send_message(chat_id=user_id, text=f"✅ Пользователь {uid} добавлен.")
+            else:
+                await bot.send_message(chat_id=user_id, text=f"⚠️ Пользователь {uid} уже имеет доступ.")
+        else:
+            await bot.send_message(chat_id=user_id, text="❌ Ошибка: введите числовой ID.")
+        await show_main_menu(user_id)
+    elif current_state == UserState.admin_remove_user:
+        if text.isdigit():
+            uid = int(text)
+            if access_control.remove_paid_user(uid):
+                await bot.send_message(chat_id=user_id, text=f"✅ Доступ пользователя {uid} отозван.")
+            else:
+                await bot.send_message(chat_id=user_id, text=f"⚠️ Пользователь {uid} не найден.")
+        else:
+            await bot.send_message(chat_id=user_id, text="❌ Ошибка: введите числовой ID.")
+        await show_main_menu(user_id)
+    elif current_state == UserState.selecting_lesson:
+        for i, m in enumerate(MODULES):
+            if text.startswith(m['emoji']) or m['title'] in text:
+                await show_module(user_id, i)
+                return
+    else:
+        await show_main_menu(user_id)
+
+@dp.callback()
 async def handle_callback(cb: CallbackQuery):
     user_id = cb.user.id
     data = cb.data
     current_state = await dp.storage.get_state(user_id)
 
-    # --- Обработка глобальных callback'ов ---
+    # Глобальные
     if data == "back_menu":
         await show_main_menu(user_id)
         await cb.answer()
         return
 
-    # --- Меню главное ---
+    # Главное меню
     if data == "menu_course":
         if not access_control.is_paid_user(user_id):
-            await bot.send_message(chat_id=user_id, text="У вас нет доступа. Нажмите 🔓 Получить доступ.")
+            await bot.send_message(chat_id=user_id, text="У вас нет доступа.")
             await cb.answer()
             return
         await bot.send_message(chat_id=user_id, text="Выберите урок:", reply_markup=get_lessons_list_keyboard())
@@ -337,8 +358,7 @@ async def handle_callback(cb: CallbackQuery):
         if not access_control.is_paid_user(user_id):
             await cb.answer()
             return
-        test_data[user_id] = {"answers": {}, "skipped": []}
-        await dp.storage.set_state(user_id, UserState.taking_test)
+        test_data[user_id] = {"answers": {}}
         await send_test_question(user_id, 0)
         await cb.answer()
         return
@@ -396,7 +416,7 @@ async def handle_callback(cb: CallbackQuery):
         await cb.answer()
         return
 
-    # --- Выбор урока ---
+    # Выбор урока
     if data.startswith("lesson_"):
         lesson_id = int(data.split("_")[1])
         module_index = lesson_id - 1
@@ -407,7 +427,7 @@ async def handle_callback(cb: CallbackQuery):
         await cb.answer()
         return
 
-    # --- Навигация внутри урока ---
+    # Навигация внутри урока
     if current_state == UserState.viewing_module:
         state_data = await dp.storage.get_data(user_id)
         cur = state_data.get("current_module", 0)
@@ -420,7 +440,7 @@ async def handle_callback(cb: CallbackQuery):
             if cur < len(MODULES) - 1:
                 await show_module(user_id, cur + 1)
             else:
-                await bot.send_message(chat_id=user_id, text="🎉 Вы завершили все уроки! Теперь можете пройти тест.")
+                await bot.send_message(chat_id=user_id, text="🎉 Вы завершили все уроки!")
         elif data == "play_audio":
             if MODULES[cur].get("has_audio"):
                 await send_audio_module(user_id, cur)
@@ -437,7 +457,7 @@ async def handle_callback(cb: CallbackQuery):
         await cb.answer()
         return
 
-    # --- Тест ---
+    # Тест
     if current_state == UserState.taking_test:
         current_q_data = await dp.storage.get_data(user_id)
         current_q = current_q_data.get("current_question", 0)
@@ -462,54 +482,54 @@ async def handle_callback(cb: CallbackQuery):
         await cb.answer()
         return
 
-    # --- Админ-панель ---
+    # Админ-панель
     if data == "admin_panel":
         if not access_control.is_admin(user_id):
             await cb.answer()
             return
         await bot.send_message(chat_id=user_id, text="👑 Управление доступом:", reply_markup=get_admin_keyboard())
-        await dp.storage.set_state(user_id, UserState.admin_add_user)  # Установим временное состояние, хотя это не совсем корректно, лучше отдельное состояние
         await cb.answer()
         return
 
-# ========== ОБРАБОТЧИК ТЕКСТОВЫХ СООБЩЕНИЙ (для ввода ID админом) ==========
-@dp.message()
-async def handle_text_messages(message: Message):
-    user_id = message.sender.id
-    text = message.body.text
-    current_state = await dp.storage.get_state(user_id)
+    if data == "admin_add_user":
+        if not access_control.is_admin(user_id):
+            await cb.answer()
+            return
+        await dp.storage.set_state(user_id, UserState.admin_add_user)
+        await bot.send_message(chat_id=user_id, text="Введите ID пользователя (число):")
+        await cb.answer()
+        return
 
-    if current_state == UserState.admin_add_user:
-        if text.isdigit():
-            uid = int(text)
-            if access_control.add_paid_user(uid):
-                await bot.send_message(chat_id=user_id, text=f"✅ Пользователь {uid} добавлен.")
-            else:
-                await bot.send_message(chat_id=user_id, text=f"⚠️ Пользователь {uid} уже имеет доступ.")
-        else:
-            await bot.send_message(chat_id=user_id, text="❌ Ошибка: введите числовой ID.")
-        await show_main_menu(user_id)
-    elif current_state == UserState.admin_remove_user:
-        if text.isdigit():
-            uid = int(text)
-            if access_control.remove_paid_user(uid):
-                await bot.send_message(chat_id=user_id, text=f"✅ Доступ пользователя {uid} отозван.")
-            else:
-                await bot.send_message(chat_id=user_id, text=f"⚠️ Пользователь {uid} не найден.")
-        else:
-            await bot.send_message(chat_id=user_id, text="❌ Ошибка: введите числовой ID.")
-        await show_main_menu(user_id)
-    elif current_state == UserState.selecting_lesson:
-        # Обработка выбора урока через текст (на случай, если пользователь ввёл текст, а не нажал кнопку)
-        for i, m in enumerate(MODULES):
-            if text.startswith(m['emoji']) or m['title'] in text:
-                await show_module(user_id, i)
-                return
-    else:
-        # если нет активного режима, покажем главное меню
-        await show_main_menu(user_id)
+    if data == "admin_remove_user":
+        if not access_control.is_admin(user_id):
+            await cb.answer()
+            return
+        await dp.storage.set_state(user_id, UserState.admin_remove_user)
+        await bot.send_message(chat_id=user_id, text="Введите ID пользователя для удаления:")
+        await cb.answer()
+        return
 
-# ========== ЗАПУСК HEALTH CHECK ДЛЯ RENDER ==========
+    if data == "admin_list_users":
+        if not access_control.is_admin(user_id):
+            await cb.answer()
+            return
+        users = access_control.get_all_paid_users()
+        if users:
+            await bot.send_message(chat_id=user_id, text=f"📋 Пользователи с доступом:\n{', '.join(map(str, users))}")
+        else:
+            await bot.send_message(chat_id=user_id, text="📋 Нет пользователей с доступом.")
+        await cb.answer()
+        return
+
+    if data == "admin_manage_admins":
+        if not access_control.is_admin(user_id):
+            await cb.answer()
+            return
+        await bot.send_message(chat_id=user_id, text="👑 Управление администраторами:\n➕ Добавить админа: /add_admin 12345\n➖ Удалить админа: /remove_admin 12345")
+        await cb.answer()
+        return
+
+# ========== ЗАПУСК РЕНДЕРА ==========
 app_flask = Flask(__name__)
 
 @app_flask.route('/')
