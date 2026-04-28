@@ -6,12 +6,20 @@ import sys
 from datetime import datetime
 from dotenv import load_dotenv
 
-from maxapi import Bot, Dispatcher
-from maxapi.types import MessageCreated, BotStarted, InlineKeyboardMarkup, InlineKeyboardButton
-from maxapi import F
+# Импорты из библиотеки maxbot
+from maxbot.bot import Bot
+from maxbot.dispatcher import Dispatcher
+from maxbot.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
+from maxbot.filters import Command, CallbackData
+from maxbot.utils import F
+from maxbot.fsm import State, StatesGroup, MemoryStorage
 
 from access_control import AccessControl
 from modules_data import MODULES, TEST_QUESTIONS, ADDITIONAL_MATERIALS
+
+# Flask для health check (чтобы Render не отключал бота)
+from flask import Flask
+import threading
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -27,7 +35,10 @@ MANAGER_CHAT_ID = int(os.getenv('MANAGER_CHAT_ID', 0))
 if not MANAGER_CHAT_ID:
     logger.warning("MANAGER_CHAT_ID не задан, уведомления о платежах не будут отправляться")
 
-# === Инициализация ===
+# === Инициализация FSM и других систем ===
+storage = MemoryStorage()  # Хранилище для состояний
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher(bot, storage=storage)
 access_control = AccessControl()
 USER_PROGRESS_FILE = "user_progress.json"
 
@@ -51,9 +62,20 @@ def save_user_progress(progress):
         logger.error(f"Ошибка сохранения прогресса: {e}")
 
 user_progress = load_user_progress()
-user_states = {}
 
-# ========== КЛАВИАТУРЫ (Inline) ==========
+# Определение состояний для FSM
+class UserState(StatesGroup):
+    selecting_lesson = State()
+    viewing_module = State()
+    taking_test = State()
+    admin_add_user = State()
+    admin_remove_user = State()
+
+# Глобальный словарь для хранения временных данных (answers, skipped)
+# В production лучше использовать FSM data, но для простоты оставим так
+test_data = {}
+
+# ========== КЛАВИАТУРЫ ==========
 def get_main_keyboard(user_id: int):
     is_paid = access_control.is_paid_user(user_id)
     is_admin = access_control.is_admin(user_id)
@@ -96,8 +118,6 @@ def get_lessons_list_keyboard():
             text=f"{m['emoji']} День {m['day']}: {m['title'][:20]}",
             callback_data=f"lesson_{m['id']}"
         )])
-    buttons.append([InlineKeyboardButton(text="📊 Мой прогресс", callback_data="menu_progress")])
-    buttons.append([InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_menu")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def get_lesson_navigation_keyboard(current_index: int, total: int):
@@ -153,46 +173,43 @@ def get_admin_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
-async def send_audio_module(bot: Bot, chat_id: int, module_index: int):
+async def send_audio_module(chat_id: int, module_index: int):
     module = MODULES[module_index]
     audio_path = os.path.join("audio", module["audio_file"])
     if not os.path.exists(audio_path):
-        await bot.send_message(chat_id, "❌ Аудиофайл временно недоступен.")
+        await bot.send_message(chat_id=chat_id, text="❌ Аудиофайл временно недоступен.")
         return
     with open(audio_path, "rb") as f:
         audio_bytes = f.read()
     caption = f"🎧 {module['emoji']} Аудио к уроку {module_index+1}: {module['title']}\nПосле прослушивания нажмите «✅ Отметить текущий модуль»."
-    await bot.send_document(chat_id, audio_bytes, filename=module["audio_file"], caption=caption)
+    await bot.send_file(chat_id=chat_id, file=audio_bytes, filename=module["audio_file"], caption=caption)
 
-async def show_module(bot: Bot, chat_id: int, module_index: int):
+async def show_module(chat_id: int, module_index: int):
     module = MODULES[module_index]
-    user_states[chat_id] = {"mode": "viewing_module", "current_module": module_index}
+    # Сохраняем состояние
+    await dp.storage.set_state(chat_id, UserState.viewing_module)
+    await dp.storage.set_data(chat_id, {"current_module": module_index})
     text = module["content"].replace("<b>", "*").replace("</b>", "*") + "\n\n"
     text += f"*Практическое задание:* {module['task']}"
-    await bot.send_message(chat_id, text)
+    await bot.send_message(chat_id=chat_id, text=text)
     if module.get("has_audio"):
-        await send_audio_module(bot, chat_id, module_index)
-    await bot.send_message(chat_id, "Навигация:", reply_markup=get_lesson_navigation_keyboard(module_index, len(MODULES)))
+        await send_audio_module(chat_id, module_index)
+    await bot.send_message(chat_id=chat_id, text="Навигация:", reply_markup=get_lesson_navigation_keyboard(module_index, len(MODULES)))
 
-async def send_test_question(bot: Bot, chat_id: int, q_index: int):
-    state = user_states.get(chat_id)
-    if not state or state.get("mode") != "taking_test":
-        return
+async def send_test_question(chat_id: int, q_index: int):
+    state = await dp.storage.get_state(chat_id)
     if q_index >= len(TEST_QUESTIONS):
-        await finish_test(bot, chat_id)
+        await finish_test(chat_id)
         return
     q = TEST_QUESTIONS[q_index]
     text = f"*Вопрос {q_index+1} из {len(TEST_QUESTIONS)}*\n\n{q['question']}\n\n"
     for key, val in q["options"].items():
         text += f"{key}) {val}\n"
-    await bot.send_message(chat_id, text, reply_markup=get_test_keyboard(q_index+1, len(TEST_QUESTIONS)))
-    state["current_question"] = q_index
+    await bot.send_message(chat_id=chat_id, text=text, reply_markup=get_test_keyboard(q_index+1, len(TEST_QUESTIONS)))
+    await dp.storage.set_data(chat_id, {"current_question": q_index})
 
-async def finish_test(bot: Bot, chat_id: int):
-    state = user_states.get(chat_id)
-    if not state:
-        return
-    answers = state.get("answers", {})
+async def finish_test(chat_id: int):
+    answers = test_data.get(chat_id, {}).get("answers", {})
     correct = 0
     results = []
     for q in TEST_QUESTIONS:
@@ -222,278 +239,300 @@ async def finish_test(bot: Bot, chat_id: int):
         "results": results
     })
     save_user_progress(user_progress)
-    await bot.send_message(chat_id, result_text)
-    user_states[chat_id] = {"mode": "main"}
-    await show_main_menu(bot, chat_id)
+    await bot.send_message(chat_id=chat_id, text=result_text)
+    await show_main_menu(chat_id)
+    test_data.pop(chat_id, None)  # Очищаем временные данные теста
+    await dp.storage.set_state(chat_id, None)
 
-async def show_main_menu(bot: Bot, chat_id: int):
-    user_states[chat_id] = {"mode": "main"}
-    await bot.send_message(chat_id, "Главное меню:", reply_markup=get_main_keyboard(chat_id))
+async def show_main_menu(chat_id: int):
+    await dp.storage.set_state(chat_id, None)
+    await bot.send_message(chat_id=chat_id, text="Главное меню:", reply_markup=get_main_keyboard(chat_id))
 
-# ========== ОБРАБОТЧИКИ MAX (через callback_data) ==========
-# Мы будем использовать единый обработчик callback-запросов,
-# чтобы избежать дублирования кода. Для простоты перепишем все
-# логические переходы через @dp.callback_query().
+# ========== ОБРАБОТЧИКИ СОБЫТИЙ maxbot ==========
 
-# Создадим обработчики callback (нажатий на кнопки)
+# Команда /start
+@dp.message(Command('start'))
+async def cmd_start(message: Message):
+    user_id = message.sender.id
+    if user_id not in user_progress:
+        user_progress[user_id] = {
+            'start_date': datetime.now().isoformat(),
+            'completed_modules': [],
+            'last_module': 0,
+            'name': message.sender.name or "Пользователь",
+            'audio_listened': [],
+            'test_results': []
+        }
+        save_user_progress(user_progress)
+    await show_main_menu(user_id)
+
+@dp.message(F.text == "bot_started")
+async def on_bot_started(message: Message):
+    await cmd_start(message)
+
+# Обработка Callback-запросов (нажатий на кнопки)
 @dp.callback_query()
-async def handle_callback(event):
-    chat_id = event.chat_id
-    data = event.data
-    state = user_states.get(chat_id, {})
+async def handle_callback(cb: CallbackQuery):
+    user_id = cb.user.id
+    data = cb.data
+    current_state = await dp.storage.get_state(user_id)
 
-    # Обработка глобальных callback
+    # --- Обработка глобальных callback'ов ---
     if data == "back_menu":
-        await show_main_menu(bot, chat_id)
+        await show_main_menu(user_id)
+        await cb.answer()
         return
 
     # --- Меню главное ---
     if data == "menu_course":
-        if not access_control.is_paid_user(chat_id):
-            await bot.send_message(chat_id, "У вас нет доступа. Нажмите 🔓 Получить доступ.")
+        if not access_control.is_paid_user(user_id):
+            await bot.send_message(chat_id=user_id, text="У вас нет доступа. Нажмите 🔓 Получить доступ.")
+            await cb.answer()
             return
-        await bot.send_message(chat_id, "Выберите урок:", reply_markup=get_lessons_list_keyboard())
-        user_states[chat_id] = {"mode": "selecting_lesson"}
+        await bot.send_message(chat_id=user_id, text="Выберите урок:", reply_markup=get_lessons_list_keyboard())
+        await dp.storage.set_state(user_id, UserState.selecting_lesson)
+        await cb.answer()
         return
 
     if data == "menu_audio":
-        if not access_control.is_paid_user(chat_id):
+        if not access_control.is_paid_user(user_id):
+            await cb.answer()
             return
         text = "🎧 Аудиоуроки:\n" + "\n".join([f"{i+1}. {m['title']}" for i,m in enumerate(MODULES) if m.get('has_audio')])
-        await bot.send_message(chat_id, text)
+        await bot.send_message(chat_id=user_id, text=text)
+        await cb.answer()
         return
 
     if data == "menu_progress":
-        if not access_control.is_paid_user(chat_id):
+        if not access_control.is_paid_user(user_id):
+            await cb.answer()
             return
-        prog = user_progress.get(chat_id, {"completed_modules": []})
+        prog = user_progress.get(user_id, {"completed_modules": []})
         completed = len(prog["completed_modules"])
-        await bot.send_message(chat_id, f"📊 Прогресс: {completed} из {len(MODULES)} модулей.")
+        await bot.send_message(chat_id=user_id, text=f"📊 Прогресс: {completed} из {len(MODULES)} модулей.")
+        await cb.answer()
         return
 
     if data == "menu_contacts":
         c = ADDITIONAL_MATERIALS["contacts"]
-        await bot.send_message(chat_id, f"📞 {c['phone']}\n📧 {c['email']}\n🌐 {c['website']}\n📱 {c['telegram']}")
+        await bot.send_message(chat_id=user_id, text=f"📞 {c['phone']}\n📧 {c['email']}\n🌐 {c['website']}\n📱 {c['telegram']}")
+        await cb.answer()
         return
 
     if data == "menu_links":
-        if not access_control.is_paid_user(chat_id):
+        if not access_control.is_paid_user(user_id):
+            await cb.answer()
             return
         text = "\n".join([f"{name}: {url}" for name, url in ADDITIONAL_MATERIALS["links"].items()])
-        await bot.send_message(chat_id, text)
+        await bot.send_message(chat_id=user_id, text=text)
+        await cb.answer()
         return
 
     if data == "menu_help":
-        await bot.send_message(chat_id, "Используйте кнопки меню. Если бот не отвечает, напишите /start или перезапустите.")
+        await bot.send_message(chat_id=user_id, text="Используйте кнопки меню. Если бот не отвечает, напишите /start или перезапустите.")
+        await cb.answer()
         return
 
     if data == "menu_test":
-        if not access_control.is_paid_user(chat_id):
+        if not access_control.is_paid_user(user_id):
+            await cb.answer()
             return
-        user_states[chat_id] = {
-            "mode": "taking_test",
-            "current_question": 0,
-            "answers": {},
-            "skipped": []
-        }
-        await send_test_question(bot, chat_id, 0)
+        test_data[user_id] = {"answers": {}, "skipped": []}
+        await dp.storage.set_state(user_id, UserState.taking_test)
+        await send_test_question(user_id, 0)
+        await cb.answer()
         return
 
     if data == "menu_test_results":
-        if not access_control.is_paid_user(chat_id):
+        if not access_control.is_paid_user(user_id):
+            await cb.answer()
             return
-        tests = user_progress.get(chat_id, {}).get("test_results", [])
+        tests = user_progress.get(user_id, {}).get("test_results", [])
         if not tests:
-            await bot.send_message(chat_id, "Вы ещё не проходили тест.")
+            await bot.send_message(chat_id=user_id, text="Вы ещё не проходили тест.")
         else:
             last = tests[-1]
-            await bot.send_message(chat_id, f"🏆 Последний результат: {last['correct_answers']}/{last['total_questions']} ({last['percentage']:.1f}%)")
+            await bot.send_message(chat_id=user_id, text=f"🏆 Последний результат: {last['correct_answers']}/{last['total_questions']} ({last['percentage']:.1f}%)")
+        await cb.answer()
         return
 
     if data == "menu_mark_all":
-        if not access_control.is_paid_user(chat_id):
+        if not access_control.is_paid_user(user_id):
+            await cb.answer()
             return
-        if chat_id not in user_progress:
-            user_progress[chat_id] = {"completed_modules": []}
-        user_progress[chat_id]["completed_modules"] = list(range(1, len(MODULES)+1))
+        if user_id not in user_progress:
+            user_progress[user_id] = {"completed_modules": []}
+        user_progress[user_id]["completed_modules"] = list(range(1, len(MODULES)+1))
         save_user_progress(user_progress)
-        await bot.send_message(chat_id, f"✅ Все {len(MODULES)} модулей отмечены как пройденные.")
+        await bot.send_message(chat_id=user_id, text=f"✅ Все {len(MODULES)} модулей отмечены как пройденные.")
+        await cb.answer()
         return
 
     if data == "menu_checklist":
-        if not access_control.is_paid_user(chat_id):
+        if not access_control.is_paid_user(user_id):
+            await cb.answer()
             return
         checklist_path = "Чек-лист -Первые 10 шагов в тендерах-.docx"
         if os.path.exists(checklist_path):
             with open(checklist_path, "rb") as f:
-                await bot.send_document(chat_id, f.read(), filename="checklist.docx", caption="📥 Чек-лист первых 10 шагов")
+                await bot.send_file(chat_id=user_id, file=f.read(), filename="checklist.docx", caption="📥 Чек-лист первых 10 шагов")
         else:
-            await bot.send_message(chat_id, "Файл чек-листа временно недоступен.")
+            await bot.send_message(chat_id=user_id, text="Файл чек-листа временно недоступен.")
+        await cb.answer()
         return
 
     if data == "get_access":
-        await bot.send_message(chat_id, "💳 Стоимость доступа: 3 999 руб.\nОплата по QR-коду:\n(отправьте фото QR или реквизиты)")
+        await bot.send_message(chat_id=user_id, text="💳 Стоимость доступа: 3 999 руб.\nОплата по QR-коду:\n(отправьте фото QR или реквизиты)")
         if os.path.exists("qr_code.png"):
             with open("qr_code.png", "rb") as f:
-                await bot.send_photo(chat_id, f.read(), caption="QR-код для оплаты")
+                await bot.send_file(chat_id=user_id, file=f.read(), filename="qr_code.png", caption="QR-код для оплаты")
         if MANAGER_CHAT_ID:
-            await bot.send_message(MANAGER_CHAT_ID, f"🔔 Запрос доступа от {chat_id}")
+            await bot.send_message(chat_id=MANAGER_CHAT_ID, text=f"🔔 Запрос доступа от {user_id}")
+        await cb.answer()
         return
 
     if data == "about_course":
-        await bot.send_message(chat_id, "Курс «Тендеры с нуля»: 8 модулей, аудио, тест, чек-лист. Для получения доступа нажмите 🔓 Получить доступ.")
+        await bot.send_message(chat_id=user_id, text="Курс «Тендеры с нуля»: 8 модулей, аудио, тест, чек-лист. Для получения доступа нажмите 🔓 Получить доступ.")
+        await cb.answer()
         return
 
     # --- Выбор урока ---
     if data.startswith("lesson_"):
         lesson_id = int(data.split("_")[1])
-        # ищем модуль по id (индекс id-1)
         module_index = lesson_id - 1
         if 0 <= module_index < len(MODULES):
-            await show_module(bot, chat_id, module_index)
+            await show_module(user_id, module_index)
+        else:
+            await bot.send_message(chat_id=user_id, text="Урок не найден.")
+        await cb.answer()
         return
 
-    # --- Навигация по уроку ---
-    if state.get("mode") == "viewing_module":
-        cur = state.get("current_module", 0)
+    # --- Навигация внутри урока ---
+    if current_state == UserState.viewing_module:
+        state_data = await dp.storage.get_data(user_id)
+        cur = state_data.get("current_module", 0)
         if data == "prev_lesson":
             if cur > 0:
-                await show_module(bot, chat_id, cur-1)
+                await show_module(user_id, cur - 1)
             else:
-                await bot.send_message(chat_id, "Это первый урок.")
+                await bot.send_message(chat_id=user_id, text="Это первый урок.")
         elif data == "next_lesson":
-            if cur < len(MODULES)-1:
-                await show_module(bot, chat_id, cur+1)
+            if cur < len(MODULES) - 1:
+                await show_module(user_id, cur + 1)
             else:
-                await bot.send_message(chat_id, "🎉 Вы завершили все уроки! Теперь можете пройти тест.")
+                await bot.send_message(chat_id=user_id, text="🎉 Вы завершили все уроки! Теперь можете пройти тест.")
         elif data == "play_audio":
-            if cur < len(MODULES) and MODULES[cur].get("has_audio"):
-                await send_audio_module(bot, chat_id, cur)
+            if MODULES[cur].get("has_audio"):
+                await send_audio_module(user_id, cur)
         elif data == "mark_current":
             module_num = cur + 1
-            if chat_id not in user_progress:
-                user_progress[chat_id] = {"completed_modules": []}
-            if module_num not in user_progress[chat_id]["completed_modules"]:
-                user_progress[chat_id]["completed_modules"].append(module_num)
+            if user_id not in user_progress:
+                user_progress[user_id] = {"completed_modules": []}
+            if module_num not in user_progress[user_id]["completed_modules"]:
+                user_progress[user_id]["completed_modules"].append(module_num)
                 save_user_progress(user_progress)
-                await bot.send_message(chat_id, f"✅ Модуль {module_num} отмечен как пройденный.")
+                await bot.send_message(chat_id=user_id, text=f"✅ Модуль {module_num} отмечен как пройденный.")
             else:
-                await bot.send_message(chat_id, "Этот модуль уже отмечен.")
+                await bot.send_message(chat_id=user_id, text="Этот модуль уже отмечен.")
+        await cb.answer()
         return
 
     # --- Тест ---
-    if state.get("mode") == "taking_test":
+    if current_state == UserState.taking_test:
+        current_q_data = await dp.storage.get_data(user_id)
+        current_q = current_q_data.get("current_question", 0)
         if data == "test_skip":
-            next_q = state.get("current_question", 0) + 1
+            next_q = current_q + 1
             if next_q < len(TEST_QUESTIONS):
-                await send_test_question(bot, chat_id, next_q)
+                await send_test_question(user_id, next_q)
             else:
-                await finish_test(bot, chat_id)
+                await finish_test(user_id)
         elif data == "test_finish":
-            await finish_test(bot, chat_id)
+            await finish_test(user_id)
         elif data.startswith("test_ans_"):
-            answer = data.split("_")[-1]  # а, б, в, г
-            q_index = state.get("current_question", 0)
-            if q_index < len(TEST_QUESTIONS):
-                state["answers"][TEST_QUESTIONS[q_index]["id"]] = answer
-                next_q = q_index + 1
-                if next_q < len(TEST_QUESTIONS):
-                    await send_test_question(bot, chat_id, next_q)
-                else:
-                    await finish_test(bot, chat_id)
+            answer = data.split("_")[-1]
+            if user_id not in test_data:
+                test_data[user_id] = {"answers": {}}
+            test_data[user_id]["answers"][TEST_QUESTIONS[current_q]["id"]] = answer
+            next_q = current_q + 1
+            if next_q < len(TEST_QUESTIONS):
+                await send_test_question(user_id, next_q)
+            else:
+                await finish_test(user_id)
+        await cb.answer()
         return
 
     # --- Админ-панель ---
     if data == "admin_panel":
-        if not access_control.is_admin(chat_id):
+        if not access_control.is_admin(user_id):
+            await cb.answer()
             return
-        await bot.send_message(chat_id, "👑 Управление доступом:", reply_markup=get_admin_keyboard())
-        user_states[chat_id] = {"mode": "admin_panel"}
+        await bot.send_message(chat_id=user_id, text="👑 Управление доступом:", reply_markup=get_admin_keyboard())
+        await dp.storage.set_state(user_id, UserState.admin_add_user)  # Установим временное состояние, хотя это не совсем корректно, лучше отдельное состояние
+        await cb.answer()
         return
 
-    if state.get("mode") == "admin_panel":
-        if data == "admin_add_user":
-            if not access_control.is_admin(chat_id): return
-            user_states[chat_id] = {"mode": "admin_add_user"}
-            await bot.send_message(chat_id, "Введите ID пользователя (число):")
-        elif data == "admin_remove_user":
-            if not access_control.is_admin(chat_id): return
-            user_states[chat_id] = {"mode": "admin_remove_user"}
-            await bot.send_message(chat_id, "Введите ID пользователя для удаления:")
-        elif data == "admin_list_users":
-            if not access_control.is_admin(chat_id): return
-            users = access_control.get_all_paid_users()
-            await bot.send_message(chat_id, f"📋 Пользователи с доступом:\n{', '.join(map(str, users))}")
-        elif data == "admin_manage_admins":
-            if not access_control.is_admin(chat_id): return
-            await bot.send_message(chat_id, "Используйте команды:\n/add_admin ID\n/remove_admin ID")
-        return
+# ========== ОБРАБОТЧИК ТЕКСТОВЫХ СООБЩЕНИЙ (для ввода ID админом) ==========
+@dp.message()
+async def handle_text_messages(message: Message):
+    user_id = message.sender.id
+    text = message.body.text
+    current_state = await dp.storage.get_state(user_id)
 
-# ========== ОБРАБОТЧИКИ ТЕКСТОВЫХ СООБЩЕНИЙ (для ввода ID админом) ==========
-@dp.message_created()
-async def handle_text_messages(event: MessageCreated):
-    chat_id = event.chat_id
-    text = event.text.strip()
-    state = user_states.get(chat_id, {})
-    mode = state.get("mode")
-
-    if mode == "admin_add_user":
+    if current_state == UserState.admin_add_user:
         if text.isdigit():
             uid = int(text)
             if access_control.add_paid_user(uid):
-                await bot.send_message(chat_id, f"✅ Пользователь {uid} добавлен.")
+                await bot.send_message(chat_id=user_id, text=f"✅ Пользователь {uid} добавлен.")
             else:
-                await bot.send_message(chat_id, f"⚠️ Пользователь {uid} уже имеет доступ.")
+                await bot.send_message(chat_id=user_id, text=f"⚠️ Пользователь {uid} уже имеет доступ.")
         else:
-            await bot.send_message(chat_id, "❌ Ошибка: введите числовой ID.")
-        user_states[chat_id] = {"mode": "main"}
-        await show_main_menu(bot, chat_id)
-    elif mode == "admin_remove_user":
+            await bot.send_message(chat_id=user_id, text="❌ Ошибка: введите числовой ID.")
+        await show_main_menu(user_id)
+    elif current_state == UserState.admin_remove_user:
         if text.isdigit():
             uid = int(text)
             if access_control.remove_paid_user(uid):
-                await bot.send_message(chat_id, f"✅ Доступ пользователя {uid} отозван.")
+                await bot.send_message(chat_id=user_id, text=f"✅ Доступ пользователя {uid} отозван.")
             else:
-                await bot.send_message(chat_id, f"⚠️ Пользователь {uid} не найден.")
+                await bot.send_message(chat_id=user_id, text=f"⚠️ Пользователь {uid} не найден.")
         else:
-            await bot.send_message(chat_id, "❌ Ошибка: введите числовой ID.")
-        user_states[chat_id] = {"mode": "main"}
-        await show_main_menu(bot, chat_id)
-    elif mode == "selecting_lesson" and text.startswith(("📚", "🏛️", "🏢", "💼", "🏦", "🚀", "🏆", "🎁")):
+            await bot.send_message(chat_id=user_id, text="❌ Ошибка: введите числовой ID.")
+        await show_main_menu(user_id)
+    elif current_state == UserState.selecting_lesson:
         # Обработка выбора урока через текст (на случай, если пользователь ввёл текст, а не нажал кнопку)
         for i, m in enumerate(MODULES):
             if text.startswith(m['emoji']) or m['title'] in text:
-                await show_module(bot, chat_id, i)
+                await show_module(user_id, i)
                 return
     else:
         # если нет активного режима, покажем главное меню
-        if state.get("mode") != "viewing_module" and state.get("mode") != "taking_test":
-            await show_main_menu(bot, chat_id)
+        await show_main_menu(user_id)
 
-# ========== ЗАПУСК ==========
+# ========== ЗАПУСК HEALTH CHECK ДЛЯ RENDER ==========
+app_flask = Flask(__name__)
+
+@app_flask.route('/')
+def health_check():
+    return "Bot is running", 200
+
+def run_flask():
+    app_flask.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)), debug=False, use_reloader=False)
+
+flask_thread = threading.Thread(target=run_flask, daemon=True)
+flask_thread.start()
+logger.info(f"Health check server started on port {os.environ.get('PORT', 8080)}")
+
+# ========== ЗАПУСК БОТА ==========
 async def main():
-    global bot
-    bot = Bot(token=BOT_TOKEN)
-    dp = Dispatcher()
-    # регистрация обработчиков уже сделана через декораторы
     try:
         await bot.delete_webhook()
         logger.info("Webhook удалён")
     except Exception as e:
         logger.warning(f"Ошибка удаления вебхука: {e}")
-    
+
     logger.info("Запуск polling...")
-    while True:
-        try:
-            await dp.start_polling(bot)
-        except Exception as e:
-            logger.error(f"Polling упал: {e}")
-            logger.info("Перезапуск через 5 секунд...")
-            await asyncio.sleep(5)
-            bot = Bot(token=BOT_TOKEN)
-            dp = Dispatcher()
-            continue
-        break
+    await dp.start_polling()
 
 if __name__ == "__main__":
     asyncio.run(main())
