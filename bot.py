@@ -2,11 +2,12 @@ import asyncio
 import logging
 import os
 import json
+import sys
 from datetime import datetime
 from dotenv import load_dotenv
 
 from maxapi import Bot, Dispatcher
-from maxapi.types import MessageCreated, BotStarted
+from maxapi.types import MessageCreated, BotStarted, InlineKeyboardMarkup, InlineKeyboardButton
 from maxapi import F
 
 from access_control import AccessControl
@@ -20,7 +21,7 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv('MAX_BOT_TOKEN')
 if not BOT_TOKEN:
     logger.error("MAX_BOT_TOKEN не задан в .env")
-    exit(1)
+    sys.exit(1)
 
 MANAGER_CHAT_ID = int(os.getenv('MANAGER_CHAT_ID', 0))
 if not MANAGER_CHAT_ID:
@@ -52,58 +53,104 @@ def save_user_progress(progress):
 user_progress = load_user_progress()
 user_states = {}
 
-# ========== КЛАВИАТУРЫ ==========
-from maxapi.types import ReplyKeyboardMarkup, KeyboardButton
-
+# ========== КЛАВИАТУРЫ (Inline) ==========
 def get_main_keyboard(user_id: int):
     is_paid = access_control.is_paid_user(user_id)
     is_admin = access_control.is_admin(user_id)
     buttons = []
     if is_paid:
-        buttons.append([KeyboardButton(text="📚 Меню курса"), KeyboardButton(text="🎧 Аудио уроки")])
-        buttons.append([KeyboardButton(text="📊 Мой прогресс"), KeyboardButton(text="📞 Контакты")])
-        buttons.append([KeyboardButton(text="🔗 Полезные ссылки"), KeyboardButton(text="🆘 Помощь")])
-        buttons.append([KeyboardButton(text="📝 Пройти тест"), KeyboardButton(text="🏆 Результаты теста")])
-        buttons.append([KeyboardButton(text="✅ Отметить все модули"), KeyboardButton(text="📥 Скачать чек-лист")])
+        buttons.append([
+            InlineKeyboardButton(text="📚 Меню курса", callback_data="menu_course"),
+            InlineKeyboardButton(text="🎧 Аудио уроки", callback_data="menu_audio")
+        ])
+        buttons.append([
+            InlineKeyboardButton(text="📊 Мой прогресс", callback_data="menu_progress"),
+            InlineKeyboardButton(text="📞 Контакты", callback_data="menu_contacts")
+        ])
+        buttons.append([
+            InlineKeyboardButton(text="🔗 Полезные ссылки", callback_data="menu_links"),
+            InlineKeyboardButton(text="🆘 Помощь", callback_data="menu_help")
+        ])
+        buttons.append([
+            InlineKeyboardButton(text="📝 Пройти тест", callback_data="menu_test"),
+            InlineKeyboardButton(text="🏆 Результаты теста", callback_data="menu_test_results")
+        ])
+        buttons.append([
+            InlineKeyboardButton(text="✅ Отметить все модули", callback_data="menu_mark_all"),
+            InlineKeyboardButton(text="📥 Скачать чек-лист", callback_data="menu_checklist")
+        ])
         if is_admin:
-            buttons.append([KeyboardButton(text="👥 Управление доступом")])
+            buttons.append([InlineKeyboardButton(text="👥 Управление доступом", callback_data="admin_panel")])
     else:
-        buttons.append([KeyboardButton(text="🔓 Получить доступ"), KeyboardButton(text="📞 Контакты")])
-        buttons.append([KeyboardButton(text="🆘 Помощь"), KeyboardButton(text="ℹ️ О курсе")])
-    buttons.append([KeyboardButton(text="◀️ Назад в меню")])
-    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
+        buttons.append([InlineKeyboardButton(text="🔓 Получить доступ", callback_data="get_access")])
+        buttons.append([InlineKeyboardButton(text="📞 Контакты", callback_data="menu_contacts")])
+        buttons.append([InlineKeyboardButton(text="🆘 Помощь", callback_data="menu_help")])
+        buttons.append([InlineKeyboardButton(text="ℹ️ О курсе", callback_data="about_course")])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def get_lessons_list_keyboard():
     buttons = []
     for m in MODULES:
-        buttons.append([KeyboardButton(text=f"{m['emoji']} День {m['day']}: {m['title'][:20]}")])
-    buttons.append([KeyboardButton(text="📊 Мой прогресс"), KeyboardButton(text="◀️ Назад в меню")])
-    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
+        buttons.append([InlineKeyboardButton(
+            text=f"{m['emoji']} День {m['day']}: {m['title'][:20]}",
+            callback_data=f"lesson_{m['id']}"
+        )])
+    buttons.append([InlineKeyboardButton(text="📊 Мой прогресс", callback_data="menu_progress")])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def get_lesson_navigation_keyboard(current_index: int, total: int):
     buttons = [
-        [KeyboardButton(text="⬅️ Предыдущий урок"), KeyboardButton(text=f"📖 {current_index+1}/{total}"), KeyboardButton(text="Следующий урок ➡️")],
-        [KeyboardButton(text="🎧 Прослушать аудио"), KeyboardButton(text="✅ Отметить текущий модуль")],
-        [KeyboardButton(text="📚 Меню курса"), KeyboardButton(text="📊 Мой прогресс"), KeyboardButton(text="◀️ Назад в меню")]
+        [
+            InlineKeyboardButton(text="⬅️ Предыдущий урок", callback_data="prev_lesson"),
+            InlineKeyboardButton(text=f"📖 {current_index+1}/{total}", callback_data="noop"),
+            InlineKeyboardButton(text="Следующий урок ➡️", callback_data="next_lesson")
+        ],
+        [
+            InlineKeyboardButton(text="🎧 Прослушать аудио", callback_data="play_audio"),
+            InlineKeyboardButton(text="✅ Отметить текущий модуль", callback_data="mark_current")
+        ],
+        [
+            InlineKeyboardButton(text="📚 Меню курса", callback_data="menu_course"),
+            InlineKeyboardButton(text="📊 Мой прогресс", callback_data="menu_progress"),
+            InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_menu")
+        ]
     ]
-    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def get_test_keyboard(current_num: int, total: int):
     buttons = [
-        [KeyboardButton(text="а"), KeyboardButton(text="б")],
-        [KeyboardButton(text="в"), KeyboardButton(text="г")],
-        [KeyboardButton(text="⏭ Пропустить"), KeyboardButton(text="🏁 Завершить тест"), KeyboardButton(text=f"❓ {current_num}/{total}")],
-        [KeyboardButton(text="◀️ Назад в меню")]
+        [
+            InlineKeyboardButton(text="а", callback_data="test_ans_а"),
+            InlineKeyboardButton(text="б", callback_data="test_ans_б")
+        ],
+        [
+            InlineKeyboardButton(text="в", callback_data="test_ans_в"),
+            InlineKeyboardButton(text="г", callback_data="test_ans_г")
+        ],
+        [
+            InlineKeyboardButton(text="⏭ Пропустить", callback_data="test_skip"),
+            InlineKeyboardButton(text="🏁 Завершить тест", callback_data="test_finish"),
+            InlineKeyboardButton(text=f"❓ {current_num}/{total}", callback_data="noop")
+        ],
+        [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_menu")]
     ]
-    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def get_admin_keyboard():
     buttons = [
-        [KeyboardButton(text="➕ Добавить пользователя"), KeyboardButton(text="➖ Удалить пользователя")],
-        [KeyboardButton(text="📋 Список пользователей"), KeyboardButton(text="👑 Управление админами")],
-        [KeyboardButton(text="◀️ Назад в меню")]
+        [
+            InlineKeyboardButton(text="➕ Добавить пользователя", callback_data="admin_add_user"),
+            InlineKeyboardButton(text="➖ Удалить пользователя", callback_data="admin_remove_user")
+        ],
+        [
+            InlineKeyboardButton(text="📋 Список пользователей", callback_data="admin_list_users"),
+            InlineKeyboardButton(text="👑 Управление админами", callback_data="admin_manage_admins")
+        ],
+        [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_menu")]
     ]
-    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 async def send_audio_module(bot: Bot, chat_id: int, module_index: int):
@@ -183,76 +230,64 @@ async def show_main_menu(bot: Bot, chat_id: int):
     user_states[chat_id] = {"mode": "main"}
     await bot.send_message(chat_id, "Главное меню:", reply_markup=get_main_keyboard(chat_id))
 
-# ========== РЕГИСТРАЦИЯ ХЕНДЛЕРОВ ==========
-def register_handlers(dp: Dispatcher, bot: Bot):
-    @dp.bot_started()
-    async def on_start(event: BotStarted):
-        await show_main_menu(bot, event.chat_id)
+# ========== ОБРАБОТЧИКИ MAX (через callback_data) ==========
+# Мы будем использовать единый обработчик callback-запросов,
+# чтобы избежать дублирования кода. Для простоты перепишем все
+# логические переходы через @dp.callback_query().
 
-    @dp.message_created(F.text == "◀️ Назад в меню")
-    async def back_to_menu(event: MessageCreated):
-        await show_main_menu(bot, event.chat.chat_id)
+# Создадим обработчики callback (нажатий на кнопки)
+@dp.callback_query()
+async def handle_callback(event):
+    chat_id = event.chat_id
+    data = event.data
+    state = user_states.get(chat_id, {})
 
-    @dp.message_created(F.text == "🔓 Получить доступ")
-    async def handle_payment(event: MessageCreated):
-        chat_id = event.chat.chat_id
-        await bot.send_message(chat_id, "💳 Стоимость доступа: 3 999 руб.\nОплата по QR-коду:\n(отправьте фото QR или реквизиты)")
-        if os.path.exists("qr_code.png"):
-            with open("qr_code.png", "rb") as f:
-                await bot.send_photo(chat_id, f.read(), caption="QR-код для оплаты")
-        if MANAGER_CHAT_ID:
-            await bot.send_message(MANAGER_CHAT_ID, f"🔔 Запрос доступа от {chat_id}")
+    # Обработка глобальных callback
+    if data == "back_menu":
+        await show_main_menu(bot, chat_id)
+        return
 
-    @dp.message_created(F.text == "ℹ️ О курсе")
-    async def about_course(event: MessageCreated):
-        await bot.send_message(event.chat.chat_id, "Курс «Тендеры с нуля»: 8 модулей, аудио, тест, чек-лист. Для получения доступа нажмите 🔓 Получить доступ.")
-
-    @dp.message_created(F.text == "📞 Контакты")
-    async def contacts(event: MessageCreated):
-        c = ADDITIONAL_MATERIALS["contacts"]
-        await bot.send_message(event.chat.chat_id, f"📞 {c['phone']}\n📧 {c['email']}\n🌐 {c['website']}\n📱 {c['telegram']}")
-
-    @dp.message_created(F.text == "🆘 Помощь")
-    async def help_command(event: MessageCreated):
-        await bot.send_message(event.chat.chat_id, "Используйте кнопки меню. Если бот не отвечает, напишите /start или перезапустите.")
-
-    @dp.message_created(F.text == "📚 Меню курса")
-    async def course_menu(event: MessageCreated):
-        chat_id = event.chat.chat_id
+    # --- Меню главное ---
+    if data == "menu_course":
         if not access_control.is_paid_user(chat_id):
             await bot.send_message(chat_id, "У вас нет доступа. Нажмите 🔓 Получить доступ.")
             return
         await bot.send_message(chat_id, "Выберите урок:", reply_markup=get_lessons_list_keyboard())
         user_states[chat_id] = {"mode": "selecting_lesson"}
+        return
 
-    @dp.message_created(F.text == "🎧 Аудио уроки")
-    async def audio_list(event: MessageCreated):
-        chat_id = event.chat.chat_id
+    if data == "menu_audio":
         if not access_control.is_paid_user(chat_id):
             return
         text = "🎧 Аудиоуроки:\n" + "\n".join([f"{i+1}. {m['title']}" for i,m in enumerate(MODULES) if m.get('has_audio')])
         await bot.send_message(chat_id, text)
+        return
 
-    @dp.message_created(F.text == "📊 Мой прогресс")
-    async def my_progress(event: MessageCreated):
-        chat_id = event.chat.chat_id
+    if data == "menu_progress":
         if not access_control.is_paid_user(chat_id):
             return
         prog = user_progress.get(chat_id, {"completed_modules": []})
         completed = len(prog["completed_modules"])
         await bot.send_message(chat_id, f"📊 Прогресс: {completed} из {len(MODULES)} модулей.")
+        return
 
-    @dp.message_created(F.text == "🔗 Полезные ссылки")
-    async def useful_links(event: MessageCreated):
-        chat_id = event.chat.chat_id
+    if data == "menu_contacts":
+        c = ADDITIONAL_MATERIALS["contacts"]
+        await bot.send_message(chat_id, f"📞 {c['phone']}\n📧 {c['email']}\n🌐 {c['website']}\n📱 {c['telegram']}")
+        return
+
+    if data == "menu_links":
         if not access_control.is_paid_user(chat_id):
             return
         text = "\n".join([f"{name}: {url}" for name, url in ADDITIONAL_MATERIALS["links"].items()])
         await bot.send_message(chat_id, text)
+        return
 
-    @dp.message_created(F.text == "📝 Пройти тест")
-    async def start_test_command(event: MessageCreated):
-        chat_id = event.chat.chat_id
+    if data == "menu_help":
+        await bot.send_message(chat_id, "Используйте кнопки меню. Если бот не отвечает, напишите /start или перезапустите.")
+        return
+
+    if data == "menu_test":
         if not access_control.is_paid_user(chat_id):
             return
         user_states[chat_id] = {
@@ -262,10 +297,9 @@ def register_handlers(dp: Dispatcher, bot: Bot):
             "skipped": []
         }
         await send_test_question(bot, chat_id, 0)
+        return
 
-    @dp.message_created(F.text == "🏆 Результаты теста")
-    async def test_results(event: MessageCreated):
-        chat_id = event.chat.chat_id
+    if data == "menu_test_results":
         if not access_control.is_paid_user(chat_id):
             return
         tests = user_progress.get(chat_id, {}).get("test_results", [])
@@ -274,10 +308,9 @@ def register_handlers(dp: Dispatcher, bot: Bot):
         else:
             last = tests[-1]
             await bot.send_message(chat_id, f"🏆 Последний результат: {last['correct_answers']}/{last['total_questions']} ({last['percentage']:.1f}%)")
+        return
 
-    @dp.message_created(F.text == "✅ Отметить все модули")
-    async def mark_all_modules(event: MessageCreated):
-        chat_id = event.chat.chat_id
+    if data == "menu_mark_all":
         if not access_control.is_paid_user(chat_id):
             return
         if chat_id not in user_progress:
@@ -285,10 +318,9 @@ def register_handlers(dp: Dispatcher, bot: Bot):
         user_progress[chat_id]["completed_modules"] = list(range(1, len(MODULES)+1))
         save_user_progress(user_progress)
         await bot.send_message(chat_id, f"✅ Все {len(MODULES)} модулей отмечены как пройденные.")
+        return
 
-    @dp.message_created(F.text == "📥 Скачать чек-лист")
-    async def download_checklist(event: MessageCreated):
-        chat_id = event.chat.chat_id
+    if data == "menu_checklist":
         if not access_control.is_paid_user(chat_id):
             return
         checklist_path = "Чек-лист -Первые 10 шагов в тендерах-.docx"
@@ -297,54 +329,47 @@ def register_handlers(dp: Dispatcher, bot: Bot):
                 await bot.send_document(chat_id, f.read(), filename="checklist.docx", caption="📥 Чек-лист первых 10 шагов")
         else:
             await bot.send_message(chat_id, "Файл чек-листа временно недоступен.")
+        return
 
-    @dp.message_created()
-    async def select_lesson(event: MessageCreated):
-        chat_id = event.chat.chat_id
-        text = event.message.body.text
-        state = user_states.get(chat_id, {})
-        if state.get("mode") == "selecting_lesson":
-            for i, m in enumerate(MODULES):
-                if text.startswith(m['emoji']) or m['title'] in text:
-                    await show_module(bot, chat_id, i)
-                    return
+    if data == "get_access":
+        await bot.send_message(chat_id, "💳 Стоимость доступа: 3 999 руб.\nОплата по QR-коду:\n(отправьте фото QR или реквизиты)")
+        if os.path.exists("qr_code.png"):
+            with open("qr_code.png", "rb") as f:
+                await bot.send_photo(chat_id, f.read(), caption="QR-код для оплаты")
+        if MANAGER_CHAT_ID:
+            await bot.send_message(MANAGER_CHAT_ID, f"🔔 Запрос доступа от {chat_id}")
+        return
 
-    @dp.message_created(F.text == "⬅️ Предыдущий урок")
-    async def prev_lesson(event: MessageCreated):
-        chat_id = event.chat.chat_id
-        state = user_states.get(chat_id, {})
-        if state.get("mode") == "viewing_module":
-            cur = state.get("current_module", 0)
+    if data == "about_course":
+        await bot.send_message(chat_id, "Курс «Тендеры с нуля»: 8 модулей, аудио, тест, чек-лист. Для получения доступа нажмите 🔓 Получить доступ.")
+        return
+
+    # --- Выбор урока ---
+    if data.startswith("lesson_"):
+        lesson_id = int(data.split("_")[1])
+        # ищем модуль по id (индекс id-1)
+        module_index = lesson_id - 1
+        if 0 <= module_index < len(MODULES):
+            await show_module(bot, chat_id, module_index)
+        return
+
+    # --- Навигация по уроку ---
+    if state.get("mode") == "viewing_module":
+        cur = state.get("current_module", 0)
+        if data == "prev_lesson":
             if cur > 0:
                 await show_module(bot, chat_id, cur-1)
             else:
                 await bot.send_message(chat_id, "Это первый урок.")
-
-    @dp.message_created(F.text == "Следующий урок ➡️")
-    async def next_lesson(event: MessageCreated):
-        chat_id = event.chat.chat_id
-        state = user_states.get(chat_id, {})
-        if state.get("mode") == "viewing_module":
-            cur = state.get("current_module", 0)
+        elif data == "next_lesson":
             if cur < len(MODULES)-1:
                 await show_module(bot, chat_id, cur+1)
             else:
                 await bot.send_message(chat_id, "🎉 Вы завершили все уроки! Теперь можете пройти тест.")
-
-    @dp.message_created(F.text == "🎧 Прослушать аудио")
-    async def replay_audio(event: MessageCreated):
-        chat_id = event.chat.chat_id
-        state = user_states.get(chat_id, {})
-        if state.get("mode") == "viewing_module":
-            cur = state.get("current_module", 0)
-            await send_audio_module(bot, chat_id, cur)
-
-    @dp.message_created(F.text == "✅ Отметить текущий модуль")
-    async def mark_current_lesson(event: MessageCreated):
-        chat_id = event.chat.chat_id
-        state = user_states.get(chat_id, {})
-        if state.get("mode") == "viewing_module":
-            cur = state.get("current_module", 0)
+        elif data == "play_audio":
+            if cur < len(MODULES) and MODULES[cur].get("has_audio"):
+                await send_audio_module(bot, chat_id, cur)
+        elif data == "mark_current":
             module_num = cur + 1
             if chat_id not in user_progress:
                 user_progress[chat_id] = {"completed_modules": []}
@@ -354,117 +379,103 @@ def register_handlers(dp: Dispatcher, bot: Bot):
                 await bot.send_message(chat_id, f"✅ Модуль {module_num} отмечен как пройденный.")
             else:
                 await bot.send_message(chat_id, "Этот модуль уже отмечен.")
+        return
 
-    @dp.message_created(F.text.in_({"а", "б", "в", "г"}))
-    async def test_answer(event: MessageCreated):
-        chat_id = event.chat.chat_id
-        answer = event.message.body.text
-        state = user_states.get(chat_id, {})
-        if state.get("mode") != "taking_test":
-            return
-        q_index = state.get("current_question", 0)
-        if q_index >= len(TEST_QUESTIONS):
-            return
-        state["answers"][TEST_QUESTIONS[q_index]["id"]] = answer
-        next_q = q_index + 1
-        if next_q < len(TEST_QUESTIONS):
-            await send_test_question(bot, chat_id, next_q)
-        else:
-            await finish_test(bot, chat_id)
-
-    @dp.message_created(F.text == "⏭ Пропустить")
-    async def skip_question(event: MessageCreated):
-        chat_id = event.chat.chat_id
-        state = user_states.get(chat_id, {})
-        if state.get("mode") == "taking_test":
+    # --- Тест ---
+    if state.get("mode") == "taking_test":
+        if data == "test_skip":
             next_q = state.get("current_question", 0) + 1
             if next_q < len(TEST_QUESTIONS):
                 await send_test_question(bot, chat_id, next_q)
             else:
                 await finish_test(bot, chat_id)
-
-    @dp.message_created(F.text == "🏁 Завершить тест")
-    async def force_finish_test(event: MessageCreated):
-        chat_id = event.chat.chat_id
-        state = user_states.get(chat_id, {})
-        if state.get("mode") == "taking_test":
+        elif data == "test_finish":
             await finish_test(bot, chat_id)
+        elif data.startswith("test_ans_"):
+            answer = data.split("_")[-1]  # а, б, в, г
+            q_index = state.get("current_question", 0)
+            if q_index < len(TEST_QUESTIONS):
+                state["answers"][TEST_QUESTIONS[q_index]["id"]] = answer
+                next_q = q_index + 1
+                if next_q < len(TEST_QUESTIONS):
+                    await send_test_question(bot, chat_id, next_q)
+                else:
+                    await finish_test(bot, chat_id)
+        return
 
-    @dp.message_created(F.text == "👥 Управление доступом")
-    async def admin_panel(event: MessageCreated):
-        chat_id = event.chat.chat_id
+    # --- Админ-панель ---
+    if data == "admin_panel":
         if not access_control.is_admin(chat_id):
             return
         await bot.send_message(chat_id, "👑 Управление доступом:", reply_markup=get_admin_keyboard())
         user_states[chat_id] = {"mode": "admin_panel"}
+        return
 
-    @dp.message_created(F.text == "➕ Добавить пользователя")
-    async def admin_add_user_start(event: MessageCreated):
-        chat_id = event.chat.chat_id
-        if not access_control.is_admin(chat_id):
-            return
-        user_states[chat_id] = {"mode": "admin_add_user"}
-        await bot.send_message(chat_id, "Введите ID пользователя (число):")
+    if state.get("mode") == "admin_panel":
+        if data == "admin_add_user":
+            if not access_control.is_admin(chat_id): return
+            user_states[chat_id] = {"mode": "admin_add_user"}
+            await bot.send_message(chat_id, "Введите ID пользователя (число):")
+        elif data == "admin_remove_user":
+            if not access_control.is_admin(chat_id): return
+            user_states[chat_id] = {"mode": "admin_remove_user"}
+            await bot.send_message(chat_id, "Введите ID пользователя для удаления:")
+        elif data == "admin_list_users":
+            if not access_control.is_admin(chat_id): return
+            users = access_control.get_all_paid_users()
+            await bot.send_message(chat_id, f"📋 Пользователи с доступом:\n{', '.join(map(str, users))}")
+        elif data == "admin_manage_admins":
+            if not access_control.is_admin(chat_id): return
+            await bot.send_message(chat_id, "Используйте команды:\n/add_admin ID\n/remove_admin ID")
+        return
 
-    @dp.message_created(F.text == "➖ Удалить пользователя")
-    async def admin_remove_user_start(event: MessageCreated):
-        chat_id = event.chat.chat_id
-        if not access_control.is_admin(chat_id):
-            return
-        user_states[chat_id] = {"mode": "admin_remove_user"}
-        await bot.send_message(chat_id, "Введите ID пользователя для удаления:")
+# ========== ОБРАБОТЧИКИ ТЕКСТОВЫХ СООБЩЕНИЙ (для ввода ID админом) ==========
+@dp.message_created()
+async def handle_text_messages(event: MessageCreated):
+    chat_id = event.chat_id
+    text = event.text.strip()
+    state = user_states.get(chat_id, {})
+    mode = state.get("mode")
 
-    @dp.message_created(F.text == "📋 Список пользователей")
-    async def admin_list_users(event: MessageCreated):
-        chat_id = event.chat.chat_id
-        if not access_control.is_admin(chat_id):
-            return
-        users = access_control.get_all_paid_users()
-        await bot.send_message(chat_id, f"📋 Пользователи с доступом:\n{', '.join(map(str, users))}")
-
-    @dp.message_created(F.text == "👑 Управление админами")
-    async def admin_manage_admins(event: MessageCreated):
-        chat_id = event.chat.chat_id
-        if not access_control.is_admin(chat_id):
-            return
-        await bot.send_message(chat_id, "Используйте команды:\n/add_admin ID\n/remove_admin ID")
-
-    @dp.message_created()
-    async def handle_admin_input(event: MessageCreated):
-        chat_id = event.chat.chat_id
-        text = event.message.body.text.strip()
-        state = user_states.get(chat_id, {})
-        mode = state.get("mode")
-        if mode == "admin_add_user":
-            if text.isdigit():
-                uid = int(text)
-                if access_control.add_paid_user(uid):
-                    await bot.send_message(chat_id, f"✅ Пользователь {uid} добавлен.")
-                else:
-                    await bot.send_message(chat_id, f"⚠️ Пользователь {uid} уже имеет доступ.")
+    if mode == "admin_add_user":
+        if text.isdigit():
+            uid = int(text)
+            if access_control.add_paid_user(uid):
+                await bot.send_message(chat_id, f"✅ Пользователь {uid} добавлен.")
             else:
-                await bot.send_message(chat_id, "❌ Ошибка: введите числовой ID.")
-            user_states[chat_id] = {"mode": "main"}
-            await show_main_menu(bot, chat_id)
-        elif mode == "admin_remove_user":
-            if text.isdigit():
-                uid = int(text)
-                if access_control.remove_paid_user(uid):
-                    await bot.send_message(chat_id, f"✅ Доступ пользователя {uid} отозван.")
-                else:
-                    await bot.send_message(chat_id, f"⚠️ Пользователь {uid} не найден.")
+                await bot.send_message(chat_id, f"⚠️ Пользователь {uid} уже имеет доступ.")
+        else:
+            await bot.send_message(chat_id, "❌ Ошибка: введите числовой ID.")
+        user_states[chat_id] = {"mode": "main"}
+        await show_main_menu(bot, chat_id)
+    elif mode == "admin_remove_user":
+        if text.isdigit():
+            uid = int(text)
+            if access_control.remove_paid_user(uid):
+                await bot.send_message(chat_id, f"✅ Доступ пользователя {uid} отозван.")
             else:
-                await bot.send_message(chat_id, "❌ Ошибка: введите числовой ID.")
-            user_states[chat_id] = {"mode": "main"}
+                await bot.send_message(chat_id, f"⚠️ Пользователь {uid} не найден.")
+        else:
+            await bot.send_message(chat_id, "❌ Ошибка: введите числовой ID.")
+        user_states[chat_id] = {"mode": "main"}
+        await show_main_menu(bot, chat_id)
+    elif mode == "selecting_lesson" and text.startswith(("📚", "🏛️", "🏢", "💼", "🏦", "🚀", "🏆", "🎁")):
+        # Обработка выбора урока через текст (на случай, если пользователь ввёл текст, а не нажал кнопку)
+        for i, m in enumerate(MODULES):
+            if text.startswith(m['emoji']) or m['title'] in text:
+                await show_module(bot, chat_id, i)
+                return
+    else:
+        # если нет активного режима, покажем главное меню
+        if state.get("mode") != "viewing_module" and state.get("mode") != "taking_test":
             await show_main_menu(bot, chat_id)
 
 # ========== ЗАПУСК ==========
 async def main():
-    # Создаём бота и диспетчер
+    global bot
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher()
-    register_handlers(dp, bot)
-    
+    # регистрация обработчиков уже сделана через декораторы
     try:
         await bot.delete_webhook()
         logger.info("Webhook удалён")
@@ -472,7 +483,6 @@ async def main():
         logger.warning(f"Ошибка удаления вебхука: {e}")
     
     logger.info("Запуск polling...")
-    # Бесконечный цикл с перезапуском при ошибках
     while True:
         try:
             await dp.start_polling(bot)
@@ -480,10 +490,8 @@ async def main():
             logger.error(f"Polling упал: {e}")
             logger.info("Перезапуск через 5 секунд...")
             await asyncio.sleep(5)
-            # Пересоздаём бота, чтобы обновить сессию
             bot = Bot(token=BOT_TOKEN)
             dp = Dispatcher()
-            register_handlers(dp, bot)
             continue
         break
 
