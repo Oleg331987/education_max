@@ -16,10 +16,6 @@ from maxbot.fsm import State, StatesGroup
 from access_control import AccessControl
 from modules_data import MODULES, TEST_QUESTIONS, ADDITIONAL_MATERIALS
 
-import sys
-print("Python version:", sys.version)
-print("Starting bot...", flush=True)
-
 # Flask для health check на Render
 from flask import Flask
 import threading
@@ -40,7 +36,7 @@ if not MANAGER_CHAT_ID:
 
 # === Инициализация ===
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(bot, workers=5, max_tasks=100)  # Настройка под вашу нагрузку
+dp = Dispatcher(bot)  # Убраны лишние аргументы workers, max_tasks
 access_control = AccessControl()
 USER_PROGRESS_FILE = "user_progress.json"
 
@@ -183,14 +179,12 @@ async def send_audio_module(chat_id: int, module_index: int):
     caption = f"🎧 {module['emoji']} Аудио к уроку {module_index+1}: {module['title']}"
     await bot.send_file(chat_id=chat_id, file=audio_bytes, filename=module["audio_file"], caption=caption)
 
-async def show_module(chat_id: int, module_index: int, state_data: dict = None):
+async def show_module(chat_id: int, module_index: int):
     module = MODULES[module_index]
-    # Сохраняем состояние через объект message, но здесь у нас нет доступа к message.
-    # В umaxbot состояние привязано к сообщению, поэтому мы сохраняем данные в test_data.
-    # Для текущего модуля будем хранить в test_data[chat_id]['current_module']
     if chat_id not in test_data:
         test_data[chat_id] = {}
     test_data[chat_id]['current_module'] = module_index
+    test_data[chat_id]['state'] = 'viewing_module'
     text = module["content"].replace("<b>", "*").replace("</b>", "*") + "\n\n"
     text += f"*Практическое задание:* {module['task']}"
     await bot.send_message(chat_id=chat_id, text=text)
@@ -242,15 +236,17 @@ async def finish_test(chat_id: int):
         "results": results
     })
     save_user_progress(user_progress)
-    # Очищаем состояние после теста
     if chat_id in test_data:
         test_data[chat_id].pop('answers', None)
         test_data[chat_id].pop('current_question', None)
+        test_data[chat_id]['state'] = None
     await bot.send_message(chat_id=chat_id, text=result_text)
     await show_main_menu(chat_id)
 
 async def show_main_menu(chat_id: int):
     await bot.send_message(chat_id=chat_id, text="Главное меню:", reply_markup=get_main_keyboard(chat_id))
+    if chat_id in test_data:
+        test_data[chat_id]['state'] = None
 
 # ========== ОБРАБОТЧИКИ ==========
 @dp.message(F.text == "/start")
@@ -269,15 +265,13 @@ async def cmd_start(message: Message):
     await message.answer("Добро пожаловать! Используйте кнопки ниже.")
     await show_main_menu(user_id)
 
-# Обработчик текстовых сообщений (для ввода ID админом)
 @dp.message()
 async def handle_text_messages(message: Message):
     user_id = message.sender.id
     text = message.text
-    # Получаем текущее состояние
-    state = await message.get_state()
+    state = test_data.get(user_id, {}).get('state')
     
-    if state == UserState.admin_add_user:
+    if state == 'admin_add_user':
         if text.isdigit():
             uid = int(text)
             if access_control.add_paid_user(uid):
@@ -286,9 +280,9 @@ async def handle_text_messages(message: Message):
                 await bot.send_message(chat_id=user_id, text=f"⚠️ Пользователь {uid} уже имеет доступ.")
         else:
             await bot.send_message(chat_id=user_id, text="❌ Ошибка: введите числовой ID.")
-        await message.reset_state()
+        test_data[user_id]['state'] = None
         await show_main_menu(user_id)
-    elif state == UserState.admin_remove_user:
+    elif state == 'admin_remove_user':
         if text.isdigit():
             uid = int(text)
             if access_control.remove_paid_user(uid):
@@ -297,20 +291,17 @@ async def handle_text_messages(message: Message):
                 await bot.send_message(chat_id=user_id, text=f"⚠️ Пользователь {uid} не найден.")
         else:
             await bot.send_message(chat_id=user_id, text="❌ Ошибка: введите числовой ID.")
-        await message.reset_state()
+        test_data[user_id]['state'] = None
         await show_main_menu(user_id)
     else:
         await show_main_menu(user_id)
 
-# Обработчик callback-запросов (нажатий на кнопки)
 @dp.callback()
 async def handle_callback(cb):
     user_id = cb.user.id
     data = cb.payload
-    # Получаем текущее состояние из test_data (так как у cb нет get_state)
     state = test_data.get(user_id, {}).get('state')
     
-    # Глобальные
     if data == "back_menu":
         await show_main_menu(user_id)
         await cb.answer()
@@ -323,10 +314,7 @@ async def handle_callback(cb):
             await cb.answer()
             return
         await bot.send_message(chat_id=user_id, text="Выберите урок:", reply_markup=get_lessons_list_keyboard())
-        # Сохраняем состояние в test_data
-        if user_id not in test_data:
-            test_data[user_id] = {}
-        test_data[user_id]['state'] = 'selecting_lesson'
+        test_data.setdefault(user_id, {})['state'] = 'selecting_lesson'
         await cb.answer()
         return
 
@@ -446,8 +434,7 @@ async def handle_callback(cb):
         return
 
     # --- Навигация внутри урока ---
-    current_state = test_data.get(user_id, {}).get('state')
-    if current_state == 'viewing_module':
+    if state == 'viewing_module':
         cur = test_data.get(user_id, {}).get('current_module', 0)
         if data == "prev_lesson":
             if cur > 0:
@@ -476,7 +463,7 @@ async def handle_callback(cb):
         return
 
     # --- Тест ---
-    if current_state == 'taking_test':
+    if state == 'taking_test':
         current_q = test_data.get(user_id, {}).get('current_question', 0)
         if data == "test_skip":
             next_q = current_q + 1
@@ -512,7 +499,6 @@ async def handle_callback(cb):
         if not access_control.is_admin(user_id):
             await cb.answer()
             return
-        # В umaxbot нет прямого доступа к state через cb, используем test_data
         if user_id not in test_data:
             test_data[user_id] = {}
         test_data[user_id]['state'] = 'admin_add_user'
@@ -568,13 +554,6 @@ flask_thread.start()
 logger.info(f"Health check server started on port {os.environ.get('PORT', 8080)}")
 
 # ========== ЗАПУСК БОТА ==========
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
 async def main():
     try:
         await bot.delete_webhook()
@@ -586,4 +565,9 @@ async def main():
     await dp.start_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
