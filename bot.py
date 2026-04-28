@@ -6,13 +6,13 @@ import sys
 from datetime import datetime
 from dotenv import load_dotenv
 
-# Импорты из umaxbot (рабочие)
-from maxbot.bot import Bot
-from maxbot.dispatcher import Dispatcher
-from maxbot.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
-from maxbot.filters import F
-from maxbot.fsm import State, StatesGroup
-from maxbot.callback_query import CallbackQuery
+# Импорты из umaxbot (исправлено: umaxbot вместо maxbot)
+from umaxbot.bot import Bot
+from umaxbot.dispatcher import Dispatcher
+from umaxbot.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
+from umaxbot.filters import F
+from umaxbot.fsm import State, StatesGroup
+from umaxbot.callback_query import CallbackQuery
 
 from access_control import AccessControl
 from modules_data import MODULES, TEST_QUESTIONS, ADDITIONAL_MATERIALS
@@ -64,7 +64,7 @@ user_progress = load_user_progress()
 user_states = {}
 user_temp_data = {}
 
-# Определение состояний для FSM (не используется напрямую, но оставим)
+# Определение состояний для FSM
 class UserState(StatesGroup):
     selecting_lesson = State()
     viewing_module = State()
@@ -302,6 +302,7 @@ async def handle_callback(cb: CallbackQuery):
     user_id = cb.user.id
     data = cb.data
     state = user_states.get(user_id)
+
     if data == "back_menu":
         await show_main_menu(user_id)
         await cb.answer()
