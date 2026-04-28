@@ -6,13 +6,13 @@ import sys
 from datetime import datetime
 from dotenv import load_dotenv
 
-# Импорты из umaxbot (исправлено: umaxbot вместо maxbot)
-from umaxbot.bot import Bot
-from umaxbot.dispatcher import Dispatcher
-from umaxbot.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
-from umaxbot.filters import F
-from umaxbot.fsm import State, StatesGroup
-from umaxbot.callback_query import CallbackQuery
+# Импорты из maxapi
+from maxapi import Bot, Dispatcher, F
+from maxapi.types import (
+    BotStarted, Command, MessageCreated, CallbackQuery,
+    InlineKeyboardMarkup, InlineKeyboardButton
+)
+from maxapi.filters import CommandStart
 
 from access_control import AccessControl
 from modules_data import MODULES, TEST_QUESTIONS, ADDITIONAL_MATERIALS
@@ -37,7 +37,7 @@ if not MANAGER_CHAT_ID:
 
 # === Инициализация ===
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(bot)
+dp = Dispatcher()
 access_control = AccessControl()
 USER_PROGRESS_FILE = "user_progress.json"
 
@@ -63,14 +63,6 @@ def save_user_progress(progress):
 user_progress = load_user_progress()
 user_states = {}
 user_temp_data = {}
-
-# Определение состояний для FSM
-class UserState(StatesGroup):
-    selecting_lesson = State()
-    viewing_module = State()
-    taking_test = State()
-    admin_add_user = State()
-    admin_remove_user = State()
 
 # ========== КЛАВИАТУРЫ ==========
 def get_main_keyboard(user_id: int):
@@ -179,7 +171,9 @@ async def send_audio_module(chat_id: int, module_index: int):
     with open(audio_path, "rb") as f:
         audio_bytes = f.read()
     caption = f"🎧 {module['emoji']} Аудио к уроку {module_index+1}: {module['title']}"
-    await bot.send_file(chat_id=chat_id, file=audio_bytes, filename=module["audio_file"], caption=caption)
+    # В maxapi отправка файла через send_document
+    from maxapi import InputFile
+    await bot.send_document(chat_id=chat_id, document=InputFile(audio_bytes, filename=module["audio_file"]), caption=caption)
 
 async def show_module(chat_id: int, module_index: int):
     module = MODULES[module_index]
@@ -251,26 +245,29 @@ async def show_main_menu(chat_id: int):
     await bot.send_message(chat_id=chat_id, text="Главное меню:", reply_markup=get_main_keyboard(chat_id))
 
 # ========== ОБРАБОТЧИКИ ==========
-@dp.message(F.text == "/start")
-async def cmd_start(message: Message):
-    user_id = message.sender.id
+@dp.bot_started()
+async def on_bot_started(event: BotStarted):
+    await show_main_menu(event.chat_id)
+
+@dp.message_created(Command('start'))
+async def cmd_start(event: MessageCreated):
+    user_id = event.chat_id
     if user_id not in user_progress:
         user_progress[user_id] = {
             'start_date': datetime.now().isoformat(),
             'completed_modules': [],
             'last_module': 0,
-            'name': message.sender.name or "Пользователь",
+            'name': event.message.sender.name or "Пользователь",
             'audio_listened': [],
             'test_results': []
         }
         save_user_progress(user_progress)
-    await message.answer("Добро пожаловать! Используйте кнопки ниже.")
     await show_main_menu(user_id)
 
-@dp.message()
-async def handle_text_messages(message: Message):
-    user_id = message.sender.id
-    text = message.text
+@dp.message_created()
+async def handle_text_messages(event: MessageCreated):
+    user_id = event.chat_id
+    text = event.message.body.text
     state = user_states.get(user_id)
     if state == "admin_add_user":
         if text.isdigit():
@@ -297,7 +294,7 @@ async def handle_text_messages(message: Message):
     else:
         await show_main_menu(user_id)
 
-@dp.callback()
+@dp.callback_query()
 async def handle_callback(cb: CallbackQuery):
     user_id = cb.user.id
     data = cb.data
@@ -402,7 +399,8 @@ async def handle_callback(cb: CallbackQuery):
         checklist_path = "Чек-лист -Первые 10 шагов в тендерах-.docx"
         if os.path.exists(checklist_path):
             with open(checklist_path, "rb") as f:
-                await bot.send_file(chat_id=user_id, file=f.read(), filename="checklist.docx", caption="📥 Чек-лист первых 10 шагов")
+                from maxapi import InputFile
+                await bot.send_document(chat_id=user_id, document=InputFile(f.read(), filename="checklist.docx"), caption="📥 Чек-лист первых 10 шагов")
         else:
             await bot.send_message(chat_id=user_id, text="Файл чек-листа временно недоступен.")
         await cb.answer()
@@ -412,7 +410,8 @@ async def handle_callback(cb: CallbackQuery):
         await bot.send_message(chat_id=user_id, text="💳 Стоимость доступа: 3 999 руб.\nОплата по QR-коду:\n(отправьте фото QR или реквизиты)")
         if os.path.exists("qr_code.png"):
             with open("qr_code.png", "rb") as f:
-                await bot.send_file(chat_id=user_id, file=f.read(), filename="qr_code.png", caption="QR-код для оплаты")
+                from maxapi import InputFile
+                await bot.send_photo(chat_id=user_id, photo=InputFile(f.read(), filename="qr_code.png"), caption="QR-код для оплаты")
         if MANAGER_CHAT_ID:
             await bot.send_message(chat_id=MANAGER_CHAT_ID, text=f"🔔 Запрос доступа от {user_id}")
         await cb.answer()
@@ -536,7 +535,7 @@ async def handle_callback(cb: CallbackQuery):
 
     await cb.answer()
 
-# ========== ЗАПУСК FLASK ДЛЯ RENDER ==========
+# ========== HEALTH CHECK ДЛЯ RENDER ==========
 app_flask = Flask(__name__)
 
 @app_flask.route('/')
@@ -557,8 +556,9 @@ async def main():
         logger.info("Webhook удалён")
     except Exception as e:
         logger.warning(f"Ошибка удаления вебхука: {e}")
+
     logger.info("Запуск polling...")
-    await dp.run_polling()
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     try:
