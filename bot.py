@@ -6,7 +6,7 @@ import sys
 from datetime import datetime
 from dotenv import load_dotenv
 
-# Импорты из maxapi (только то, что точно есть)
+# Импорты из maxapi
 from maxapi import Bot, Dispatcher, F
 from maxapi.types import BotStarted, Command, MessageCreated
 
@@ -57,8 +57,8 @@ def save_user_progress(progress):
         logger.error(f"Ошибка сохранения прогресса: {e}")
 
 user_progress = load_user_progress()
-user_states = {}           # {user_id: "state"}
-user_temp_data = {}        # {user_id: {"current_module": int, "answers": {}, "current_question": int}}
+user_states = {}
+user_temp_data = {}
 
 async def send_audio_module(chat_id: int, module_index: int):
     module = MODULES[module_index]
@@ -174,11 +174,11 @@ async def show_main_menu(chat_id: int):
 # ========== ОБРАБОТЧИКИ КОМАНД ==========
 @dp.bot_started()
 async def on_bot_started(event: BotStarted):
-    await show_main_menu(event.chat_id)
+    await show_main_menu(event.peer_id)
 
 @dp.message_created(Command('start'))
 async def cmd_start(event: MessageCreated):
-    user_id = event.chat_id
+    user_id = event.peer_id
     if user_id not in user_progress:
         user_progress[user_id] = {
             'start_date': datetime.now().isoformat(),
@@ -193,7 +193,7 @@ async def cmd_start(event: MessageCreated):
 
 @dp.message_created(Command('menu_course'))
 async def cmd_menu_course(event: MessageCreated):
-    user_id = event.chat_id
+    user_id = event.peer_id
     if not access_control.is_paid_user(user_id):
         await bot.send_message(chat_id=user_id, text="У вас нет доступа. Отправьте /get_access")
         return
@@ -206,7 +206,7 @@ async def cmd_menu_course(event: MessageCreated):
 
 @dp.message_created(Command('lesson'))
 async def cmd_lesson(event: MessageCreated):
-    user_id = event.chat_id
+    user_id = event.peer_id
     if not access_control.is_paid_user(user_id):
         await bot.send_message(chat_id=user_id, text="Нет доступа")
         return
@@ -222,7 +222,7 @@ async def cmd_lesson(event: MessageCreated):
 
 @dp.message_created(Command('prev'))
 async def cmd_prev(event: MessageCreated):
-    user_id = event.chat_id
+    user_id = event.peer_id
     if user_states.get(user_id) != "viewing_module":
         await bot.send_message(chat_id=user_id, text="Вы не просматриваете урок. Откройте урок через /lesson")
         return
@@ -234,7 +234,7 @@ async def cmd_prev(event: MessageCreated):
 
 @dp.message_created(Command('next'))
 async def cmd_next(event: MessageCreated):
-    user_id = event.chat_id
+    user_id = event.peer_id
     if user_states.get(user_id) != "viewing_module":
         await bot.send_message(chat_id=user_id, text="Вы не просматриваете урок. Откройте урок через /lesson")
         return
@@ -246,7 +246,7 @@ async def cmd_next(event: MessageCreated):
 
 @dp.message_created(Command('audio'))
 async def cmd_audio(event: MessageCreated):
-    user_id = event.chat_id
+    user_id = event.peer_id
     if user_states.get(user_id) != "viewing_module":
         await bot.send_message(chat_id=user_id, text="Вы не просматриваете урок. Откройте урок через /lesson")
         return
@@ -258,7 +258,7 @@ async def cmd_audio(event: MessageCreated):
 
 @dp.message_created(Command('done'))
 async def cmd_done(event: MessageCreated):
-    user_id = event.chat_id
+    user_id = event.peer_id
     if user_states.get(user_id) != "viewing_module":
         await bot.send_message(chat_id=user_id, text="Вы не просматриваете урок. Откройте урок через /lesson")
         return
@@ -275,7 +275,7 @@ async def cmd_done(event: MessageCreated):
 
 @dp.message_created(Command('audio_list'))
 async def cmd_audio_list(event: MessageCreated):
-    user_id = event.chat_id
+    user_id = event.peer_id
     if not access_control.is_paid_user(user_id):
         return
     text = "🎧 *Аудиоуроки:*\n"
@@ -286,7 +286,7 @@ async def cmd_audio_list(event: MessageCreated):
 
 @dp.message_created(Command('progress'))
 async def cmd_progress(event: MessageCreated):
-    user_id = event.chat_id
+    user_id = event.peer_id
     if not access_control.is_paid_user(user_id):
         await bot.send_message(chat_id=user_id, text="Нет доступа")
         return
@@ -297,11 +297,11 @@ async def cmd_progress(event: MessageCreated):
 @dp.message_created(Command('contacts'))
 async def cmd_contacts(event: MessageCreated):
     c = ADDITIONAL_MATERIALS["contacts"]
-    await bot.send_message(chat_id=event.chat_id, text=f"📞 {c['phone']}\n📧 {c['email']}\n🌐 {c['website']}\n📱 {c['telegram']}")
+    await bot.send_message(chat_id=event.peer_id, text=f"📞 {c['phone']}\n📧 {c['email']}\n🌐 {c['website']}\n📱 {c['telegram']}")
 
 @dp.message_created(Command('links'))
 async def cmd_links(event: MessageCreated):
-    user_id = event.chat_id
+    user_id = event.peer_id
     if not access_control.is_paid_user(user_id):
         return
     text = "\n".join([f"{name}: {url}" for name, url in ADDITIONAL_MATERIALS["links"].items()])
@@ -309,12 +309,12 @@ async def cmd_links(event: MessageCreated):
 
 @dp.message_created(Command('help'))
 async def cmd_help(event: MessageCreated):
-    user_id = event.chat_id
+    user_id = event.peer_id
     await show_main_menu(user_id)
 
 @dp.message_created(Command('test'))
 async def cmd_test(event: MessageCreated):
-    user_id = event.chat_id
+    user_id = event.peer_id
     if not access_control.is_paid_user(user_id):
         await bot.send_message(chat_id=user_id, text="Нет доступа")
         return
@@ -326,7 +326,7 @@ async def cmd_test(event: MessageCreated):
 
 @dp.message_created(Command('test_results'))
 async def cmd_test_results(event: MessageCreated):
-    user_id = event.chat_id
+    user_id = event.peer_id
     if not access_control.is_paid_user(user_id):
         return
     tests = user_progress.get(user_id, {}).get("test_results", [])
@@ -338,7 +338,7 @@ async def cmd_test_results(event: MessageCreated):
 
 @dp.message_created(Command('mark_all'))
 async def cmd_mark_all(event: MessageCreated):
-    user_id = event.chat_id
+    user_id = event.peer_id
     if not access_control.is_paid_user(user_id):
         return
     if user_id not in user_progress:
@@ -349,7 +349,7 @@ async def cmd_mark_all(event: MessageCreated):
 
 @dp.message_created(Command('checklist'))
 async def cmd_checklist(event: MessageCreated):
-    user_id = event.chat_id
+    user_id = event.peer_id
     if not access_control.is_paid_user(user_id):
         return
     checklist_path = "Чек-лист -Первые 10 шагов в тендерах-.docx"
@@ -365,7 +365,7 @@ async def cmd_checklist(event: MessageCreated):
 
 @dp.message_created(Command('get_access'))
 async def cmd_get_access(event: MessageCreated):
-    user_id = event.chat_id
+    user_id = event.peer_id
     await bot.send_message(chat_id=user_id, text="💳 Стоимость доступа: 3 999 руб.\nОплата по QR-коду:\n(отправьте фото QR или реквизиты)")
     if os.path.exists("qr_code.png"):
         with open("qr_code.png", "rb") as f:
@@ -379,12 +379,12 @@ async def cmd_get_access(event: MessageCreated):
 
 @dp.message_created(Command('about'))
 async def cmd_about(event: MessageCreated):
-    await bot.send_message(chat_id=event.chat_id, text="Курс «Тендеры с нуля»: 8 модулей, аудио, тест, чек-лист. Для получения доступа /get_access")
+    await bot.send_message(chat_id=event.peer_id, text="Курс «Тендеры с нуля»: 8 модулей, аудио, тест, чек-лист. Для получения доступа /get_access")
 
 # ========== АДМИН-КОМАНДЫ ==========
 @dp.message_created(Command('admin'))
 async def cmd_admin(event: MessageCreated):
-    user_id = event.chat_id
+    user_id = event.peer_id
     if not access_control.is_admin(user_id):
         await bot.send_message(chat_id=user_id, text="Нет прав")
         return
@@ -398,7 +398,7 @@ async def cmd_admin(event: MessageCreated):
 
 @dp.message_created(Command('add_user'))
 async def cmd_add_user(event: MessageCreated):
-    user_id = event.chat_id
+    user_id = event.peer_id
     if not access_control.is_admin(user_id):
         return
     args = event.message.body.text.split()
@@ -413,7 +413,7 @@ async def cmd_add_user(event: MessageCreated):
 
 @dp.message_created(Command('remove_user'))
 async def cmd_remove_user(event: MessageCreated):
-    user_id = event.chat_id
+    user_id = event.peer_id
     if not access_control.is_admin(user_id):
         return
     args = event.message.body.text.split()
@@ -428,7 +428,7 @@ async def cmd_remove_user(event: MessageCreated):
 
 @dp.message_created(Command('list_users'))
 async def cmd_list_users(event: MessageCreated):
-    user_id = event.chat_id
+    user_id = event.peer_id
     if not access_control.is_admin(user_id):
         return
     users = access_control.get_all_paid_users()
@@ -439,7 +439,7 @@ async def cmd_list_users(event: MessageCreated):
 
 @dp.message_created(Command('add_admin'))
 async def cmd_add_admin(event: MessageCreated):
-    user_id = event.chat_id
+    user_id = event.peer_id
     if not access_control.is_admin(user_id):
         return
     args = event.message.body.text.split()
@@ -454,7 +454,7 @@ async def cmd_add_admin(event: MessageCreated):
 
 @dp.message_created(Command('remove_admin'))
 async def cmd_remove_admin(event: MessageCreated):
-    user_id = event.chat_id
+    user_id = event.peer_id
     if not access_control.is_admin(user_id):
         return
     args = event.message.body.text.split()
@@ -470,7 +470,7 @@ async def cmd_remove_admin(event: MessageCreated):
 # ========== ОБРАБОТЧИК ТЕКСТОВЫХ ОТВЕТОВ В ТЕСТЕ ==========
 @dp.message_created()
 async def handle_text_in_test(event: MessageCreated):
-    user_id = event.chat_id
+    user_id = event.peer_id
     state = user_states.get(user_id)
     if state != "taking_test":
         return
@@ -501,7 +501,7 @@ async def handle_text_in_test(event: MessageCreated):
     else:
         await bot.send_message(chat_id=user_id, text="Некорректный ввод. Отправьте букву а, б, в, г или команды /skip, /finish")
 
-# ========== HEALTH CHECK ДЛЯ RENDER ==========
+# ========== HEALTH CHECK ==========
 app_flask = Flask(__name__)
 
 @app_flask.route('/')
