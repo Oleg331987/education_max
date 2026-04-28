@@ -556,7 +556,23 @@ logger.info(f"Health check server started on port {os.environ.get('PORT', 8080)}
 # ========== ЗАПУСК БОТА ==========
 async def main():
     logger.info("Запуск polling...")
-    await dp.start_polling(bot)
+    # Пробуем разные способы запуска в зависимости от версии библиотеки
+    if hasattr(dp, 'start_polling'):
+        await dp.start_polling(bot)
+    elif hasattr(bot, 'start_polling'):
+        await bot.start_polling(dp)
+    elif hasattr(dp, 'polling'):
+        await dp.polling(bot)
+    elif hasattr(bot, 'polling'):
+        await bot.polling(dp)
+    elif hasattr(dp, 'start'):
+        await dp.start()
+    else:
+        logger.error("Не удалось найти метод для запуска polling. Проверьте версию umaxbot.")
+        # Выводим доступные методы для отладки
+        logger.error(f"Доступные методы Dispatcher: {[m for m in dir(dp) if not m.startswith('_')]}")
+        logger.error(f"Доступные методы Bot: {[m for m in dir(bot) if not m.startswith('_')]}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     try:
