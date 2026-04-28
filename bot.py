@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 # Импорты из maxapi
 from maxapi import Bot, Dispatcher, F
 from maxapi.types import (
-    BotStarted, Command, MessageCreated, CallbackQuery,
+    BotStarted, Command, MessageCreated, CallbackButton,
     InlineKeyboardMarkup, InlineKeyboardButton
 )
 from maxapi.filters import CommandStart
@@ -171,7 +171,6 @@ async def send_audio_module(chat_id: int, module_index: int):
     with open(audio_path, "rb") as f:
         audio_bytes = f.read()
     caption = f"🎧 {module['emoji']} Аудио к уроку {module_index+1}: {module['title']}"
-    # В maxapi отправка файла через send_document
     from maxapi import InputFile
     await bot.send_document(chat_id=chat_id, document=InputFile(audio_bytes, filename=module["audio_file"]), caption=caption)
 
@@ -294,8 +293,9 @@ async def handle_text_messages(event: MessageCreated):
     else:
         await show_main_menu(user_id)
 
+# Используем CallbackButton вместо CallbackQuery
 @dp.callback_query()
-async def handle_callback(cb: CallbackQuery):
+async def handle_callback(cb: CallbackButton):
     user_id = cb.user.id
     data = cb.data
     state = user_states.get(user_id)
@@ -535,7 +535,7 @@ async def handle_callback(cb: CallbackQuery):
 
     await cb.answer()
 
-# ========== HEALTH CHECK ДЛЯ RENDER ==========
+# ========== ЗАПУСК HEALTH CHECK ДЛЯ RENDER ==========
 app_flask = Flask(__name__)
 
 @app_flask.route('/')
