@@ -9,7 +9,6 @@ from dotenv import load_dotenv
 # Импорты из maxapi (только то, что точно есть)
 from maxapi import Bot, Dispatcher, F
 from maxapi.types import BotStarted, Command, MessageCreated
-from maxapi.filters import CommandStart
 
 from access_control import AccessControl
 from modules_data import MODULES, TEST_QUESTIONS, ADDITIONAL_MATERIALS
@@ -319,7 +318,6 @@ async def cmd_test(event: MessageCreated):
     if not access_control.is_paid_user(user_id):
         await bot.send_message(chat_id=user_id, text="Нет доступа")
         return
-    # Проверка, пройдены ли основные модули – можно пропустить
     user_states[user_id] = "taking_test"
     if user_id not in user_temp_data:
         user_temp_data[user_id] = {}
@@ -358,7 +356,10 @@ async def cmd_checklist(event: MessageCreated):
     if os.path.exists(checklist_path):
         with open(checklist_path, "rb") as f:
             from maxapi import InputFile
-            await bot.send_document(chat_id=user_id, document=InputFile(f.read(), filename="checklist.docx"), caption="📥 Чек-лист первых 10 шагов")
+            try:
+                await bot.send_document(chat_id=user_id, document=InputFile(f.read(), filename="checklist.docx"), caption="📥 Чек-лист первых 10 шагов")
+            except:
+                await bot.send_message(chat_id=user_id, text="Ошибка отправки файла. Файл может быть слишком большим.")
     else:
         await bot.send_message(chat_id=user_id, text="Файл чек-листа временно недоступен.")
 
@@ -369,7 +370,10 @@ async def cmd_get_access(event: MessageCreated):
     if os.path.exists("qr_code.png"):
         with open("qr_code.png", "rb") as f:
             from maxapi import InputFile
-            await bot.send_photo(chat_id=user_id, photo=InputFile(f.read(), filename="qr_code.png"), caption="QR-код для оплаты")
+            try:
+                await bot.send_photo(chat_id=user_id, photo=InputFile(f.read(), filename="qr_code.png"), caption="QR-код для оплаты")
+            except:
+                await bot.send_message(chat_id=user_id, text="Не удалось отправить QR-код. Пожалуйста, свяжитесь с менеджером.")
     if MANAGER_CHAT_ID:
         await bot.send_message(chat_id=MANAGER_CHAT_ID, text=f"🔔 Запрос доступа от {user_id}")
 
@@ -472,7 +476,6 @@ async def handle_text_in_test(event: MessageCreated):
         return
     text = event.message.body.text.strip().lower()
     if text == "/skip":
-        # пропустить вопрос
         current_q = user_temp_data.get(user_id, {}).get("current_question", 0)
         next_q = current_q + 1
         if next_q < len(TEST_QUESTIONS):
