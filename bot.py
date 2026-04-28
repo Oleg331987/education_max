@@ -36,7 +36,7 @@ if not MANAGER_CHAT_ID:
 
 # === Инициализация ===
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(bot)  # Убраны лишние аргументы workers, max_tasks
+dp = Dispatcher(bot)
 access_control = AccessControl()
 USER_PROGRESS_FILE = "user_progress.json"
 
@@ -555,14 +555,10 @@ logger.info(f"Health check server started on port {os.environ.get('PORT', 8080)}
 
 # ========== ЗАПУСК БОТА ==========
 async def main():
-    try:
-        await bot.delete_webhook()
-        logger.info("Webhook удалён")
-    except Exception as e:
-        logger.warning(f"Ошибка удаления вебхука: {e}")
-
+    # В umaxbot нет метода delete_webhook, пропускаем
     logger.info("Запуск polling...")
-    await dp.start_polling()
+    # Правильный способ запуска: bot.run_polling(dispatcher)
+    await bot.run_polling(dp)
 
 if __name__ == "__main__":
     try:
