@@ -16,6 +16,10 @@ from maxbot.fsm import State, StatesGroup
 from access_control import AccessControl
 from modules_data import MODULES, TEST_QUESTIONS, ADDITIONAL_MATERIALS
 
+import sys
+print("Python version:", sys.version)
+print("Starting bot...", flush=True)
+
 # Flask для health check на Render
 from flask import Flask
 import threading
